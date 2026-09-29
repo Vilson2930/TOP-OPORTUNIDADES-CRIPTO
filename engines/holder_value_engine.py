@@ -767,6 +767,65 @@ def calculate_economic_staking_score(
 
 
 # ============================================================
+# HOLDER REVENUE YIELD
+# ============================================================
+
+def extract_holder_revenue_yield(
+    row: pd.Series,
+) -> float:
+
+    explicit = _first_available(
+        row,
+        [
+            "holder_revenue_yield",
+            "tokenholder_revenue_yield",
+        ],
+    )
+
+    if not pd.isna(explicit):
+        if explicit > 1:
+            explicit = explicit / 100
+        return explicit
+
+    holder_revenue = extract_holder_revenue(row)
+
+    market_cap = _safe_float(
+        row.get("market_cap")
+    )
+
+    if (
+        pd.isna(holder_revenue)
+        or pd.isna(market_cap)
+        or market_cap <= 0
+    ):
+        return np.nan
+
+    return holder_revenue / market_cap
+
+
+def score_holder_revenue_yield(
+    holder_revenue_yield: float,
+) -> float:
+
+    if pd.isna(holder_revenue_yield):
+        return np.nan
+
+    if holder_revenue_yield <= 0:
+        return 0.0
+
+    # Opportunity-oriented economic yield:
+    # 10%+ annual holder revenue / market cap is exceptional.
+    if holder_revenue_yield >= 0.10:
+        return 100.0
+
+    return _clip_score(
+        holder_revenue_yield
+        / 0.10
+        * 100
+    )
+
+
+# ============================================================
 # HOLDER VALUE SCORE
 # ============================================================
 
@@ -774,91 +833,104 @@ def calculate_holder_value_score(
     row: pd.Series,
 ) -> float:
 
-    real_yield = (
-        calculate_real_yield(
-            row
-        )
-    )
+    real_yield = calculate_real_yield(row)
 
     fee_distribution = (
-        extract_fee_distribution_ratio(
-            row
-        )
+        extract_fee_distribution_ratio(row)
+    )
+
+    holder_revenue_yield = (
+        extract_holder_revenue_yield(row)
     )
 
     components = {
-        "real_yield":
-            (
-                score_real_yield(
-                    real_yield
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "real_yield"
-                ],
+        "real_yield": (
+            score_real_yield(real_yield),
+            config.HOLDER_VALUE_WEIGHTS[
+                "real_yield"
+            ],
+        ),
+        "fee_distribution": (
+            score_fee_distribution(
+                fee_distribution
             ),
-
-        "fee_distribution":
-            (
-                score_fee_distribution(
-                    fee_distribution
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "fee_distribution"
-                ],
+            config.HOLDER_VALUE_WEIGHTS[
+                "fee_distribution"
+            ],
+        ),
+        "buyback": (
+            calculate_buyback_score(row),
+            config.HOLDER_VALUE_WEIGHTS[
+                "buyback"
+            ],
+        ),
+        "burn": (
+            calculate_burn_score(row),
+            config.HOLDER_VALUE_WEIGHTS[
+                "burn"
+            ],
+        ),
+        "token_required_for_usage": (
+            calculate_token_usage_score(row),
+            config.HOLDER_VALUE_WEIGHTS[
+                "token_required_for_usage"
+            ],
+        ),
+        "economic_staking": (
+            calculate_economic_staking_score(
+                row
             ),
-
-        "buyback":
-            (
-                calculate_buyback_score(
-                    row
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "buyback"
-                ],
-            ),
-
-        "burn":
-            (
-                calculate_burn_score(
-                    row
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "burn"
-                ],
-            ),
-
-        "token_required_for_usage":
-            (
-                calculate_token_usage_score(
-                    row
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "token_required_for_usage"
-                ],
-            ),
-
-        "economic_staking":
-            (
-                calculate_economic_staking_score(
-                    row
-                ),
-                config.HOLDER_VALUE_WEIGHTS[
-                    "economic_staking"
-                ],
-            ),
+            config.HOLDER_VALUE_WEIGHTS[
+                "economic_staking"
+            ],
+        ),
     }
 
-    score = _weighted_average(
+    base_score = _weighted_average(
         components
     )
 
-    if pd.isna(score):
+    # holder_revenue_yield is direct economic evidence of value capture
+    # relative to token valuation. It is intentionally NOT called real yield.
+    economic_yield_score = (
+        score_holder_revenue_yield(
+            holder_revenue_yield
+        )
+    )
+
+    if (
+        pd.isna(base_score)
+        and pd.isna(economic_yield_score)
+    ):
         return np.nan
+
+    if pd.isna(base_score):
+        return round(
+            _clip_score(
+                economic_yield_score
+            ),
+            2,
+        )
+
+    if pd.isna(economic_yield_score):
+        return round(
+            _clip_score(base_score),
+            2,
+        )
+
+    # Preserve the original holder-value architecture while adding a
+    # valuation-aware opportunity confirmation. This prevents fee share
+    # alone from automatically becoming 100 when economic yield is weak.
+    score = (
+        base_score * 0.70
+        + economic_yield_score * 0.30
+    )
 
     return round(
         _clip_score(score),
         2,
     )
+
 
 
 # ============================================================
@@ -1123,6 +1195,12 @@ def evaluate_holder_value(
         )
     )
 
+    holder_revenue_yield = (
+        extract_holder_revenue_yield(
+            row
+        )
+    )
+
     holder_score = (
         calculate_holder_value_score(
             row
@@ -1179,6 +1257,14 @@ def evaluate_holder_value(
 
         "holder_capture_ratio":
             capture_ratio,
+
+        "holder_revenue_yield":
+            holder_revenue_yield,
+
+        "holder_revenue_yield_score":
+            score_holder_revenue_yield(
+                holder_revenue_yield
+            ),
 
         "holder_value_score":
             holder_score,
