@@ -23,6 +23,7 @@ A camada de relatório NÃO altera nenhuma decisão do engine.
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -49,11 +50,8 @@ from reportlab.platypus import (
     KeepTogether,
 )
 
-import config
-
-
 # ============================================================
-# PATHS
+# PROJECT ROOT / IMPORT PATH
 # ============================================================
 
 BASE_DIR = os.path.dirname(
@@ -63,6 +61,19 @@ BASE_DIR = os.path.dirname(
         )
     )
 )
+
+if BASE_DIR not in sys.path:
+    sys.path.insert(
+        0,
+        BASE_DIR,
+    )
+
+import config
+
+
+# ============================================================
+# PATHS
+# ============================================================
 
 OUTPUT_DIR = os.path.join(
     BASE_DIR,
