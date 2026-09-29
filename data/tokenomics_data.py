@@ -12,12 +12,22 @@ Analisa:
 - market cap / FDV;
 - supply ainda não circulante;
 - diluição potencial;
-- inflação aproximada;
+- inflação aproximada quando disponível;
 - pressão estrutural de oferta;
 - risco de grande quantidade de tokens ainda por liberar.
 
 IMPORTANTE:
 Diluição crítica pode bloquear uma oportunidade.
+
+OTIMIZAÇÃO:
+A execução principal utiliza os dados de supply já coletados pelo
+market_data.py.
+
+Isso evita centenas de chamadas individuais ao CoinGecko e elimina
+o principal gargalo de rate limit desta camada.
+
+Consultas históricas continuam disponíveis para uso isolado,
+mas ficam DESATIVADAS por padrão no pipeline principal.
 """
 
 from __future__ import annotations
@@ -34,9 +44,9 @@ import config
 
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 
-REQUEST_TIMEOUT = 30
-MAX_RETRIES = 4
-RETRY_BACKOFF_SECONDS = 3
+REQUEST_TIMEOUT = 20
+MAX_RETRIES = 2
+RETRY_BACKOFF_SECONDS = 2
 
 
 # ============================================================
@@ -52,10 +62,16 @@ def _request(
 
     headers = {
         "accept": "application/json",
-        "user-agent": f"{config.ENGINE_NAME}/{config.ENGINE_VERSION}",
+        "user-agent": (
+            f"{config.ENGINE_NAME}/"
+            f"{config.ENGINE_VERSION}"
+        ),
     }
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
 
         try:
 
@@ -67,9 +83,19 @@ def _request(
             )
 
             if response.status_code == 200:
-                return response.json()
+
+                try:
+                    return response.json()
+
+                except ValueError:
+                    return None
 
             if response.status_code == 429:
+
+                # Não manter o GitHub Actions preso
+                # em longos ciclos de espera.
+                if attempt >= MAX_RETRIES:
+                    return None
 
                 wait = (
                     RETRY_BACKOFF_SECONDS
@@ -78,13 +104,20 @@ def _request(
 
                 print(
                     "[tokenomics_data] "
-                    f"Rate limit. Aguardando {wait}s."
+                    f"Rate limit. Retry em {wait}s."
                 )
 
                 time.sleep(wait)
                 continue
 
-            if 500 <= response.status_code < 600:
+            if (
+                500
+                <= response.status_code
+                < 600
+            ):
+
+                if attempt >= MAX_RETRIES:
+                    return None
 
                 wait = (
                     RETRY_BACKOFF_SECONDS
@@ -104,7 +137,7 @@ def _request(
 
         except requests.RequestException:
 
-            if attempt == MAX_RETRIES:
+            if attempt >= MAX_RETRIES:
                 return None
 
             time.sleep(
@@ -119,16 +152,27 @@ def _request(
 # HELPERS
 # ============================================================
 
-def _safe_float(value) -> float:
+def _safe_float(
+    value,
+) -> float:
 
     try:
 
         if value is None:
             return np.nan
 
-        return float(value)
+        result = float(value)
 
-    except (TypeError, ValueError):
+        if not np.isfinite(result):
+            return np.nan
+
+        return result
+
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
         return np.nan
 
 
@@ -144,10 +188,25 @@ def _safe_divide(
     ):
         return np.nan
 
-    return numerator / denominator
+    try:
+
+        result = (
+            numerator
+            / denominator
+        )
+
+        if not np.isfinite(result):
+            return np.nan
+
+        return float(result)
+
+    except Exception:
+        return np.nan
 
 
-def _clip_score(value: float) -> float:
+def _clip_score(
+    value: float,
+) -> float:
 
     if pd.isna(value):
         return np.nan
@@ -169,6 +228,9 @@ def fetch_token_details(
     coin_id: str,
 ) -> Dict:
 
+    if not coin_id:
+        return {}
+
     params = {
         "localization": "false",
         "tickers": "false",
@@ -183,7 +245,10 @@ def fetch_token_details(
         params=params,
     )
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict,
+    ):
         return {}
 
     return data
@@ -216,12 +281,14 @@ def calculate_supply_metrics(
     if (
         not pd.isna(total_supply)
         and not pd.isna(circulating_supply)
+        and total_supply >= 0
+        and circulating_supply >= 0
     ):
 
         non_circulating_supply = max(
             total_supply
             - circulating_supply,
-            0,
+            0.0,
         )
 
     else:
@@ -282,7 +349,8 @@ def calculate_fdv_metrics(
     ):
 
         fdv_premium = (
-            fdv / market_cap
+            fdv
+            / market_cap
             - 1
         )
 
@@ -308,6 +376,17 @@ def fetch_market_cap_history(
     days: int = 365,
 ) -> pd.DataFrame:
 
+    if not coin_id:
+
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "price",
+                "market_cap",
+                "estimated_supply",
+            ]
+        )
+
     params = {
         "vs_currency":
             config.BASE_CURRENCY.lower(),
@@ -324,8 +403,19 @@ def fetch_market_cap_history(
         params=params,
     )
 
-    if not isinstance(data, dict):
-        return pd.DataFrame()
+    if not isinstance(
+        data,
+        dict,
+    ):
+
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "price",
+                "market_cap",
+                "estimated_supply",
+            ]
+        )
 
     prices = data.get(
         "prices",
@@ -341,65 +431,115 @@ def fetch_market_cap_history(
         not prices
         or not market_caps
     ):
-        return pd.DataFrame()
 
-    price_df = pd.DataFrame(
-        prices,
-        columns=[
-            "timestamp",
-            "price",
-        ],
-    )
-
-    cap_df = pd.DataFrame(
-        market_caps,
-        columns=[
-            "timestamp",
-            "market_cap",
-        ],
-    )
-
-    history = price_df.merge(
-        cap_df,
-        on="timestamp",
-        how="inner",
-    )
-
-    history["date"] = pd.to_datetime(
-        history["timestamp"],
-        unit="ms",
-        utc=True,
-    )
-
-    history["estimated_supply"] = (
-        history["market_cap"]
-        / history["price"].replace(
-            0,
-            np.nan,
-        )
-    )
-
-    return (
-        history[
-            [
+        return pd.DataFrame(
+            columns=[
                 "date",
                 "price",
                 "market_cap",
                 "estimated_supply",
             ]
-        ]
-        .replace(
-            [np.inf, -np.inf],
-            np.nan,
         )
-        .dropna(
-            subset=[
+
+    try:
+
+        price_df = pd.DataFrame(
+            prices,
+            columns=[
+                "timestamp",
+                "price",
+            ],
+        )
+
+        cap_df = pd.DataFrame(
+            market_caps,
+            columns=[
+                "timestamp",
+                "market_cap",
+            ],
+        )
+
+        history = price_df.merge(
+            cap_df,
+            on="timestamp",
+            how="inner",
+        )
+
+        if history.empty:
+
+            return pd.DataFrame(
+                columns=[
+                    "date",
+                    "price",
+                    "market_cap",
+                    "estimated_supply",
+                ]
+            )
+
+        history["date"] = (
+            pd.to_datetime(
+                history["timestamp"],
+                unit="ms",
+                utc=True,
+                errors="coerce",
+            )
+        )
+
+        history["price"] = (
+            pd.to_numeric(
+                history["price"],
+                errors="coerce",
+            )
+        )
+
+        history["market_cap"] = (
+            pd.to_numeric(
+                history["market_cap"],
+                errors="coerce",
+            )
+        )
+
+        history["estimated_supply"] = (
+            history["market_cap"]
+            / history["price"].replace(
+                0,
+                np.nan,
+            )
+        )
+
+        return (
+            history[
+                [
+                    "date",
+                    "price",
+                    "market_cap",
+                    "estimated_supply",
+                ]
+            ]
+            .replace(
+                [np.inf, -np.inf],
+                np.nan,
+            )
+            .dropna(
+                subset=[
+                    "date",
+                    "estimated_supply",
+                ]
+            )
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+
+    except Exception:
+
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "price",
+                "market_cap",
                 "estimated_supply",
             ]
         )
-        .sort_values("date")
-        .reset_index(drop=True)
-    )
 
 
 # ============================================================
@@ -411,16 +551,25 @@ def _supply_days_ago(
     days: int,
 ) -> float:
 
-    if history.empty:
+    if (
+        history is None
+        or history.empty
+        or "date" not in history.columns
+        or "estimated_supply"
+        not in history.columns
+    ):
         return np.nan
 
     target = (
         history["date"].iloc[-1]
-        - pd.Timedelta(days=days)
+        - pd.Timedelta(
+            days=days
+        )
     )
 
     previous = history[
-        history["date"] <= target
+        history["date"]
+        <= target
     ]
 
     if previous.empty:
@@ -442,7 +591,12 @@ def calculate_supply_inflation(
     days: int,
 ) -> float:
 
-    if history.empty:
+    if (
+        history is None
+        or history.empty
+        or "estimated_supply"
+        not in history.columns
+    ):
         return np.nan
 
     current_supply = _safe_float(
@@ -451,9 +605,11 @@ def calculate_supply_inflation(
         ].iloc[-1]
     )
 
-    old_supply = _supply_days_ago(
-        history,
-        days,
+    old_supply = (
+        _supply_days_ago(
+            history,
+            days,
+        )
     )
 
     if (
@@ -463,11 +619,16 @@ def calculate_supply_inflation(
     ):
         return np.nan
 
-    return (
+    result = (
         current_supply
         / old_supply
         - 1
     )
+
+    if not np.isfinite(result):
+        return np.nan
+
+    return float(result)
 
 
 # ============================================================
@@ -489,12 +650,20 @@ def calculate_supply_overhang(
     future_supply = max(
         total_supply
         - circulating_supply,
-        0,
+        0.0,
     )
 
-    return (
+    result = (
         future_supply
         / total_supply
+    )
+
+    return float(
+        np.clip(
+            result,
+            0,
+            1,
+        )
     )
 
 
@@ -622,11 +791,13 @@ def calculate_dilution_score(
 
         try:
 
-            annualized_90d = (
-                (1 + inflation_90d)
-                ** (365 / 90)
-                - 1
-            )
+            if inflation_90d > -1:
+
+                annualized_90d = (
+                    (1 + inflation_90d)
+                    ** (365 / 90)
+                    - 1
+                )
 
         except Exception:
 
@@ -674,7 +845,8 @@ def calculate_dilution_score(
             continue
 
         weighted_sum += (
-            score * weight
+            score
+            * weight
         )
 
         available_weight += weight
@@ -707,6 +879,7 @@ def classify_dilution_risk(
         and circulating_ratio
         < config.MIN_CIRCULATING_SUPPLY_RATIO_CRITICAL
     ):
+
         critical_conditions.append(
             "LOW_CIRCULATING_SUPPLY"
         )
@@ -716,6 +889,7 @@ def classify_dilution_risk(
         and market_cap_fdv_ratio
         < config.MIN_MARKET_CAP_FDV_RATIO_CRITICAL
     ):
+
         critical_conditions.append(
             "LOW_MC_FDV"
         )
@@ -725,6 +899,7 @@ def classify_dilution_risk(
         and inflation_365d
         > config.MAX_ANNUAL_INFLATION_CRITICAL
     ):
+
         critical_conditions.append(
             "HIGH_INFLATION"
         )
@@ -733,6 +908,7 @@ def classify_dilution_risk(
         not pd.isna(dilution_score)
         and dilution_score < 25
     ):
+
         critical_conditions.append(
             "VERY_LOW_DILUTION_SCORE"
         )
@@ -747,6 +923,7 @@ def classify_dilution_risk(
         and circulating_ratio
         < config.MIN_CIRCULATING_SUPPLY_RATIO_WARNING
     ):
+
         warning_conditions.append(
             "CIRCULATING_WARNING"
         )
@@ -756,6 +933,7 @@ def classify_dilution_risk(
         and market_cap_fdv_ratio
         < config.MIN_MARKET_CAP_FDV_RATIO_WARNING
     ):
+
         warning_conditions.append(
             "MC_FDV_WARNING"
         )
@@ -765,6 +943,7 @@ def classify_dilution_risk(
         and inflation_365d
         > config.MAX_ANNUAL_INFLATION_WARNING
     ):
+
         warning_conditions.append(
             "INFLATION_WARNING"
         )
@@ -836,23 +1015,165 @@ def calculate_dilution_opportunity_modifier(
 
 
 # ============================================================
+# EXTRAÇÃO DE SUPPLY DO MARKET DATA
+# ============================================================
+
+def _extract_market_supply(
+    row: pd.Series,
+) -> Dict[str, float]:
+
+    circulating_supply = (
+        _safe_float(
+            row.get(
+                "circulating_supply"
+            )
+        )
+    )
+
+    total_supply = (
+        _safe_float(
+            row.get(
+                "total_supply"
+            )
+        )
+    )
+
+    max_supply = (
+        _safe_float(
+            row.get(
+                "max_supply"
+            )
+        )
+    )
+
+    market_cap = (
+        _safe_float(
+            row.get(
+                "market_cap"
+            )
+        )
+    )
+
+    fdv = (
+        _safe_float(
+            row.get(
+                "fdv"
+            )
+        )
+    )
+
+    # Se total_supply não estiver disponível,
+    # max_supply pode servir como referência estrutural.
+    if (
+        pd.isna(total_supply)
+        and not pd.isna(max_supply)
+        and max_supply > 0
+    ):
+        total_supply = max_supply
+
+    # Se FDV não veio diretamente, tenta estimar
+    # usando market cap e razão circulante.
+    if (
+        pd.isna(fdv)
+        and not pd.isna(market_cap)
+        and not pd.isna(circulating_supply)
+        and not pd.isna(total_supply)
+        and circulating_supply > 0
+        and total_supply > 0
+    ):
+
+        fdv = (
+            market_cap
+            * total_supply
+            / circulating_supply
+        )
+
+    return {
+        "circulating_supply":
+            circulating_supply,
+
+        "total_supply":
+            total_supply,
+
+        "max_supply":
+            max_supply,
+
+        "market_cap":
+            market_cap,
+
+        "fdv":
+            fdv,
+    }
+
+
+# ============================================================
 # ENRIQUECIMENTO
 # ============================================================
 
 def enrich_with_tokenomics_data(
     market_df: pd.DataFrame,
-    fetch_history: bool = True,
-    sleep_seconds: float = 1.2,
+    fetch_history: bool = False,
+    sleep_seconds: float = 0.0,
+    fetch_missing_details: bool = False,
 ) -> pd.DataFrame:
 
-    if market_df.empty:
-        return market_df.copy()
+    """
+    Enriquece o dataset de mercado com métricas de tokenomics.
+
+    PADRÃO OTIMIZADO:
+    fetch_history=False
+    fetch_missing_details=False
+
+    Portanto, no pipeline principal, esta função NÃO faz
+    uma chamada HTTP por ativo.
+
+    Os dados estruturais de supply são reaproveitados do
+    market_data.py.
+
+    Histórico pode ser ativado explicitamente para análises
+    específicas, mas não deve ser usado para centenas de ativos
+    em uma única execução pública do CoinGecko.
+    """
+
+    if (
+        market_df is None
+        or market_df.empty
+    ):
+        return (
+            market_df.copy()
+            if isinstance(
+                market_df,
+                pd.DataFrame,
+            )
+            else pd.DataFrame()
+        )
 
     records = []
 
     total = len(
         market_df
     )
+
+    print(
+        "[tokenomics_data] "
+        f"Processando {total} ativos."
+    )
+
+    if not fetch_history:
+
+        print(
+            "[tokenomics_data] "
+            "Modo rápido ativo: "
+            "histórico individual desativado."
+        )
+
+    if not fetch_missing_details:
+
+        print(
+            "[tokenomics_data] "
+            "Detalhes individuais CoinGecko "
+            "desativados."
+        )
 
     for position, (_, row) in enumerate(
         market_df.iterrows(),
@@ -867,72 +1188,84 @@ def enrich_with_tokenomics_data(
             "symbol"
         )
 
-        print(
-            "[tokenomics_data] "
-            f"{symbol} "
-            f"({position}/{total})"
+        if (
+            position == 1
+            or position == total
+            or position % 25 == 0
+        ):
+
+            print(
+                "[tokenomics_data] "
+                f"{symbol} "
+                f"({position}/{total})"
+            )
+
+        market_values = (
+            _extract_market_supply(
+                row
+            )
         )
 
         circulating_supply = (
-            _safe_float(
-                row.get(
-                    "circulating_supply"
-                )
-            )
+            market_values[
+                "circulating_supply"
+            ]
         )
 
         total_supply = (
-            _safe_float(
-                row.get(
-                    "total_supply"
-                )
-            )
+            market_values[
+                "total_supply"
+            ]
         )
 
         max_supply = (
-            _safe_float(
-                row.get(
-                    "max_supply"
-                )
-            )
+            market_values[
+                "max_supply"
+            ]
         )
 
         market_cap = (
-            _safe_float(
-                row.get(
-                    "market_cap"
-                )
-            )
+            market_values[
+                "market_cap"
+            ]
         )
 
         fdv = (
-            _safe_float(
-                row.get(
-                    "fdv"
-                )
-            )
+            market_values[
+                "fdv"
+            ]
         )
 
         # ----------------------------------------------------
-        # Fallback para detalhes CoinGecko
+        # FALLBACK OPCIONAL
+        # ----------------------------------------------------
+        # Desativado no pipeline principal.
+        # Só é usado quando solicitado explicitamente.
         # ----------------------------------------------------
 
-        if any(
-            pd.isna(value)
-            for value in [
-                circulating_supply,
-                total_supply,
-            ]
+        if (
+            fetch_missing_details
+            and coin_id
+            and (
+                pd.isna(
+                    circulating_supply
+                )
+                or pd.isna(
+                    total_supply
+                )
+            )
         ):
 
-            details = fetch_token_details(
-                coin_id
+            details = (
+                fetch_token_details(
+                    str(coin_id)
+                )
             )
 
             market_data = (
                 details.get(
                     "market_data",
-                    {}
+                    {},
                 )
                 if details
                 else {}
@@ -974,6 +1307,30 @@ def enrich_with_tokenomics_data(
                     )
                 )
 
+            if (
+                pd.isna(total_supply)
+                and not pd.isna(max_supply)
+                and max_supply > 0
+            ):
+                total_supply = (
+                    max_supply
+                )
+
+            if (
+                pd.isna(fdv)
+                and not pd.isna(market_cap)
+                and not pd.isna(circulating_supply)
+                and not pd.isna(total_supply)
+                and circulating_supply > 0
+                and total_supply > 0
+            ):
+
+                fdv = (
+                    market_cap
+                    * total_supply
+                    / circulating_supply
+                )
+
         supply_metrics = (
             calculate_supply_metrics(
                 circulating_supply,
@@ -1001,11 +1358,23 @@ def enrich_with_tokenomics_data(
         inflation_180d = np.nan
         inflation_365d = np.nan
 
-        if fetch_history:
+        # ----------------------------------------------------
+        # HISTÓRICO OPCIONAL
+        # ----------------------------------------------------
+        # Não utilizado na execução normal para evitar
+        # centenas de chamadas individuais e HTTP 429.
+        # ----------------------------------------------------
+
+        if (
+            fetch_history
+            and coin_id
+        ):
 
             history = (
                 fetch_market_cap_history(
-                    coin_id=coin_id,
+                    coin_id=str(
+                        coin_id
+                    ),
                     days=365,
                 )
             )
@@ -1037,6 +1406,12 @@ def enrich_with_tokenomics_data(
                     365,
                 )
             )
+
+            if sleep_seconds > 0:
+
+                time.sleep(
+                    sleep_seconds
+                )
 
         dilution_score = (
             calculate_dilution_score(
@@ -1131,17 +1506,14 @@ def enrich_with_tokenomics_data(
             }
         )
 
-        if fetch_history:
-
-            time.sleep(
-                sleep_seconds
-            )
-
     tokenomics_df = (
         pd.DataFrame(
             records
         )
     )
+
+    if tokenomics_df.empty:
+        return market_df.copy()
 
     duplicate_columns = [
         column
@@ -1151,20 +1523,39 @@ def enrich_with_tokenomics_data(
             "max_supply",
             "market_cap_fdv_ratio",
         ]
-        if column in market_df.columns
+        if column
+        in market_df.columns
     ]
 
     base_df = (
         market_df.drop(
-            columns=duplicate_columns,
+            columns=
+                duplicate_columns,
             errors="ignore",
         )
     )
 
-    result = base_df.merge(
-        tokenomics_df,
-        on="coin_id",
-        how="left",
+    result = (
+        base_df.merge(
+            tokenomics_df,
+            on="coin_id",
+            how="left",
+        )
+    )
+
+    print(
+        "[tokenomics_data] "
+        f"Concluído: {len(result)} ativos."
+    )
+
+    print(
+        "[tokenomics_data] "
+        "Nenhuma consulta histórica individual "
+        "foi necessária."
+        if not fetch_history
+        else
+        "[tokenomics_data] "
+        "Histórico individual habilitado."
     )
 
     return result
@@ -1193,7 +1584,8 @@ if __name__ == "__main__":
     result = (
         enrich_with_tokenomics_data(
             market,
-            fetch_history=True,
+            fetch_history=False,
+            fetch_missing_details=False,
         )
     )
 
@@ -1215,20 +1607,38 @@ if __name__ == "__main__":
     available = [
         column
         for column in columns
-        if column in result.columns
+        if column
+        in result.columns
     ]
 
-    print(
-        result[
-            available
-        ]
-        .sort_values(
-            "dilution_score",
-            ascending=False,
-            na_position="last",
+    if (
+        "dilution_score"
+        in result.columns
+    ):
+
+        output = (
+            result[
+                available
+            ]
+            .sort_values(
+                "dilution_score",
+                ascending=False,
+                na_position="last",
+            )
+            .head(50)
         )
-        .head(50)
-        .to_string(
+
+    else:
+
+        output = (
+            result[
+                available
+            ]
+            .head(50)
+        )
+
+    print(
+        output.to_string(
             index=False
         )
     )
