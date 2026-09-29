@@ -109,6 +109,13 @@ def check_structural_exclusion(
             "EURT",
             "EURS",
             "RLUSD",
+            "USDG",
+            "GHO",
+            "USDAI",
+            "MUSD",
+            "BUSD",
+            "FRXUSD",
+            "FXUSD",
         }
 
         if (
@@ -134,6 +141,11 @@ def check_structural_exclusion(
             "CBBTC",
             "TBTC",
             "WSTETH",
+            "STETH",
+            "RETH",
+            "CBETH",
+            "FRXETH",
+            "BTC.B",
         }
 
         if (
