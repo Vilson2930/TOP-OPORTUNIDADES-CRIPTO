@@ -15,13 +15,10 @@ concurrency:
 
 jobs:
   run-engine:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 60
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -87,7 +84,6 @@ jobs:
           recipient = "vilsonjosepereirapinto@gmail.com"
 
           output_dir = Path("output")
-
           pdf_file = output_dir / "crypto_opportunity_report.pdf"
           summary_file = output_dir / "engine_summary.txt"
           top_file = output_dir / "crypto_opportunities_top.csv"
@@ -102,53 +98,46 @@ jobs:
                   encoding="utf-8"
               )
           else:
-              summary = (
-                  "Crypto Opportunity Engine executado "
-                  "com sucesso."
-              )
+              summary = "Resumo não disponível."
 
           generated_at = datetime.now(
               timezone.utc
           ).strftime("%d/%m/%Y %H:%M UTC")
 
           message = EmailMessage()
-
           message["From"] = gmail_user
           message["To"] = recipient
           message["Subject"] = (
-              "Crypto Opportunity Engine — "
-              "Relatório Diário"
+              "Crypto Opportunity Engine - Relatorio Diario"
           )
 
-          body = f"""
-CRYPTO OPPORTUNITY ENGINE
+          body_lines = [
+              "CRYPTO OPPORTUNITY ENGINE",
+              "",
+              "Execucao concluida com sucesso.",
+              "",
+              f"Data da execucao: {generated_at}",
+              "",
+              "RESUMO DO MOTOR",
+              "=" * 60,
+              "",
+              summary,
+              "",
+              "=" * 60,
+              "",
+              "O relatorio completo esta anexado em PDF.",
+              "",
+              "O motor procura projetos cripto de qualidade em que",
+              "a melhora economica e fundamental esteja avancando",
+              "mais rapidamente que a precificacao do mercado.",
+              "",
+              "O timing e analisado separadamente da qualidade",
+              "da oportunidade.",
+          ]
 
-Execução concluída com sucesso.
-
-Data da execução:
-{generated_at}
-
-RESUMO DO MOTOR
-============================================================
-
-{summary}
-
-============================================================
-
-O relatório completo está anexado em PDF.
-
-Metodologia:
-O motor procura projetos cripto de qualidade em que a melhora
-econômica e fundamental esteja avançando mais rapidamente do
-que a precificação do mercado.
-
-O timing é analisado separadamente da qualidade da oportunidade.
-
-Arquivo principal:
-crypto_opportunity_report.pdf
-"""
-
-          message.set_content(body)
+          message.set_content(
+              "\n".join(body_lines)
+          )
 
           with pdf_file.open("rb") as file:
               message.add_attachment(
@@ -167,27 +156,23 @@ crypto_opportunity_report.pdf
                       filename=top_file.name,
                   )
 
-          print(
-              "[email] Conectando ao Gmail SMTP..."
-          )
+          print("[email] Conectando ao Gmail...")
 
           with smtplib.SMTP_SSL(
               "smtp.gmail.com",
               465,
               timeout=30,
           ) as smtp:
-
               smtp.login(
                   gmail_user,
                   gmail_password,
               )
-
               smtp.send_message(
                   message
               )
 
           print(
-              "[email] Relatório enviado com sucesso para "
+              "[email] Relatorio enviado com sucesso para "
               + recipient
           )
           PY
