@@ -1174,6 +1174,388 @@ def _top_opportunities_table(
 
 
 # ============================================================
+# NEAR APPROVAL OPPORTUNITIES
+# ============================================================
+
+def _near_approval_dataset(
+    full_result: pd.DataFrame,
+    limit: int = 10,
+) -> pd.DataFrame:
+
+    if full_result.empty:
+        return pd.DataFrame()
+
+    result = full_result.copy()
+
+    if "quality_gate" in result.columns:
+        result = result[
+            result["quality_gate"] != True
+        ].copy()
+
+    if "hard_block" in result.columns:
+        result = result[
+            result["hard_block"] != True
+        ].copy()
+
+    gate_specs = [
+        (
+            "opportunity_score",
+            float(config.MIN_OPPORTUNITY_SCORE),
+            "Opportunity",
+        ),
+        (
+            "fundamental_acceleration_score",
+            float(config.MIN_FUNDAMENTAL_SCORE),
+            "Fundamental",
+        ),
+        (
+            "revenue_score",
+            float(config.MIN_REVENUE_SCORE),
+            "Revenue",
+        ),
+        (
+            "holder_value_score",
+            float(config.MIN_HOLDER_VALUE_SCORE),
+            "Holder",
+        ),
+        (
+            "dilution_score",
+            float(config.MIN_DILUTION_SCORE),
+            "Dilution",
+        ),
+    ]
+
+    records = []
+
+    for index, row in result.iterrows():
+
+        failed = []
+        missing = []
+        normalized_gaps = []
+
+        for field, threshold, label in gate_specs:
+
+            value = _safe_float(
+                row.get(field)
+            )
+
+            if pd.isna(value):
+                missing.append(label)
+                normalized_gaps.append(1.0)
+                continue
+
+            if value < threshold:
+                failed.append(
+                    f"{label} {_format_number(value)}"
+                )
+                normalized_gaps.append(
+                    max(
+                        0.0,
+                        (threshold - value)
+                        / max(threshold, 1.0),
+                    )
+                )
+
+        if not failed and not missing:
+            continue
+
+        opportunity = _safe_float(
+            row.get("opportunity_score")
+        )
+
+        completeness = _safe_float(
+            row.get(
+                "opportunity_data_completeness"
+            )
+        )
+
+        if pd.isna(completeness):
+            completeness = _safe_float(
+                row.get(
+                    "decision_confidence"
+                )
+            )
+
+            if not pd.isna(completeness):
+                completeness = completeness / 100.0
+
+        gap_mean = (
+            float(np.mean(normalized_gaps))
+            if normalized_gaps
+            else 1.0
+        )
+
+        failure_count = (
+            len(failed)
+            + len(missing)
+        )
+
+        record = row.to_dict()
+
+        record["_near_failure_count"] = (
+            failure_count
+        )
+
+        record["_near_gap"] = gap_mean
+
+        record["_near_opportunity"] = (
+            opportunity
+            if not pd.isna(opportunity)
+            else -1.0
+        )
+
+        record["_near_completeness"] = (
+            completeness
+            if not pd.isna(completeness)
+            else -1.0
+        )
+
+        reasons = []
+
+        if failed:
+            reasons.append(
+                "Abaixo: "
+                + ", ".join(failed)
+            )
+
+        if missing:
+            reasons.append(
+                "Sem dado: "
+                + ", ".join(missing)
+            )
+
+        record["near_approval_reason"] = (
+            " | ".join(reasons)
+        )
+
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame()
+
+    near = pd.DataFrame(records)
+
+    near = near.sort_values(
+        by=[
+            "_near_failure_count",
+            "_near_gap",
+            "_near_completeness",
+            "_near_opportunity",
+        ],
+        ascending=[
+            True,
+            True,
+            False,
+            False,
+        ],
+        na_position="last",
+    )
+
+    near = (
+        near
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+    near["near_rank"] = np.arange(
+        1,
+        len(near) + 1,
+    )
+
+    return near
+
+
+def _near_approval_table(
+    dataset: pd.DataFrame,
+    styles,
+):
+
+    if dataset.empty:
+
+        return Paragraph(
+            "Nenhum ativo próximo da aprovação foi identificado.",
+            styles["body"],
+        )
+
+    columns = [
+        ("near_rank", "#", 7),
+        ("symbol", "ATIVO", 15),
+        ("opportunity_score", "OPP.", 13),
+        ("fundamental_acceleration_score", "FUND.", 13),
+        ("revenue_score", "REV.", 13),
+        ("holder_value_score", "HOLDER", 14),
+        ("dilution_score", "DIL.", 13),
+        ("timing_score", "TIMING", 14),
+        ("signal", "SINAL", 20),
+        ("near_approval_reason", "O QUE FALTA", 72),
+    ]
+
+    available = [
+        column
+        for column in columns
+        if column[0] in dataset.columns
+    ]
+
+    header = [
+        Paragraph(
+            label,
+            styles["table_header"],
+        )
+        for _, label, _ in available
+    ]
+
+    data = [header]
+
+    numeric_fields = {
+        "opportunity_score",
+        "fundamental_acceleration_score",
+        "revenue_score",
+        "holder_value_score",
+        "dilution_score",
+        "timing_score",
+    }
+
+    left_fields = {
+        "symbol",
+        "signal",
+        "near_approval_reason",
+    }
+
+    for _, row in dataset.iterrows():
+
+        table_row = []
+
+        for field, _, _ in available:
+
+            value = _value(
+                row,
+                field,
+            )
+
+            if field in numeric_fields:
+                display = _format_number(
+                    value
+                )
+            else:
+                display = str(
+                    value
+                )
+
+            style = (
+                styles["table_cell_left"]
+                if field in left_fields
+                else styles["table_cell"]
+            )
+
+            table_row.append(
+                Paragraph(
+                    display,
+                    style,
+                )
+            )
+
+        data.append(table_row)
+
+    total_units = sum(
+        column[2]
+        for column in available
+    )
+
+    available_width = (
+        PAGE_WIDTH
+        - LEFT_MARGIN
+        - RIGHT_MARGIN
+    )
+
+    col_widths = [
+        available_width
+        * column[2]
+        / total_units
+        for column in available
+    ]
+
+    table = Table(
+        data,
+        colWidths=col_widths,
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+
+    table.setStyle(
+        TableStyle(
+            [
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor(
+                        "#374151"
+                    ),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.25,
+                    colors.HexColor(
+                        "#d1d5db"
+                    ),
+                ),
+                (
+                    "ROWBACKGROUNDS",
+                    (0, 1),
+                    (-1, -1),
+                    [
+                        colors.white,
+                        colors.HexColor(
+                            "#f9fafb"
+                        ),
+                    ],
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "MIDDLE",
+                ),
+                (
+                    "TOPPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    3,
+                ),
+                (
+                    "BOTTOMPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    3,
+                ),
+                (
+                    "LEFTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+                (
+                    "RIGHTPADDING",
+                    (0, 0),
+                    (-1, -1),
+                    2,
+                ),
+            ]
+        )
+    )
+
+    return table
+
+
+# ============================================================
 # METHODOLOGY
 # ============================================================
 
@@ -1623,6 +2005,56 @@ def build_pdf_report(
     story.append(
         _top_opportunities_table(
             top_result,
+            styles,
+        )
+    )
+
+    story.append(
+        PageBreak()
+    )
+
+    # ========================================================
+    # NEAR APPROVAL OPPORTUNITIES
+    # ========================================================
+
+    near_result = _near_approval_dataset(
+        full_result,
+        limit=10,
+    )
+
+    story.append(
+        Paragraph(
+            "Oportunidades Próximas da Aprovação",
+            styles[
+                "heading"
+            ],
+        )
+    )
+
+    story.append(
+        Paragraph(
+            (
+                "Ativos que ainda não passaram por todos os Quality Gates, "
+                "mas estão mais próximos da aprovação entre os não bloqueados. "
+                "Esta seção é apenas informativa e não altera score, sinal, "
+                "Quality Gate ou decisão do engine."
+            ),
+            styles[
+                "small"
+            ],
+        )
+    )
+
+    story.append(
+        Spacer(
+            1,
+            3 * mm,
+        )
+    )
+
+    story.append(
+        _near_approval_table(
+            near_result,
             styles,
         )
     )
