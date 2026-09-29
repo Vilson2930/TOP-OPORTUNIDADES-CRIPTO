@@ -2,22 +2,33 @@
 CRYPTO OPPORTUNITY ENGINE
 Market Data Layer
 
-Responsável por:
+Fonte principal:
+- CoinGecko
+
+Fallback automático:
+- CoinPaprika
+
+Objetivo:
 - Construir o universo inicial.
 - Excluir BTC.
 - Excluir stablecoins.
 - Excluir wrapped assets.
 - Coletar preço, market cap, FDV, volume e supply.
 - Calcular retornos e drawdown.
-- Preparar dados para o Opportunity Engine.
+- Manter exatamente a estrutura esperada pelos demais engines.
 
-Fonte principal:
-CoinGecko Public API.
+IMPORTANTE:
+Se CoinGecko responder 403, 429 ou ficar indisponível,
+o engine tenta automaticamente CoinPaprika.
+
+A CoinPaprika disponibiliza /v1/tickers sem necessidade de API key
+para o fluxo básico de market data.
 """
 
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -27,7 +38,17 @@ import requests
 import config
 
 
-COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+# ============================================================
+# APIs
+# ============================================================
+
+COINGECKO_BASE_URL = (
+    "https://api.coingecko.com/api/v3"
+)
+
+COINPAPRIKA_BASE_URL = (
+    "https://api.coinpaprika.com/v1"
+)
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 4
@@ -59,6 +80,7 @@ MARKET_COLUMNS = [
     "price_change_7d",
     "price_change_30d",
     "last_updated",
+    "market_source",
 ]
 
 HISTORY_METRIC_COLUMNS = [
@@ -124,7 +146,7 @@ WRAPPED_SYMBOLS = {
 
 
 # ============================================================
-# DATAFRAME VAZIO PADRONIZADO
+# EMPTY DATAFRAME
 # ============================================================
 
 def _empty_market_dataframe(
@@ -157,161 +179,6 @@ def _empty_market_dataframe(
     return pd.DataFrame(
         columns=columns
     )
-
-
-# ============================================================
-# HTTP
-# ============================================================
-
-def _request(
-    endpoint: str,
-    params: Optional[Dict] = None,
-) -> Optional[object]:
-
-    url = (
-        f"{COINGECKO_BASE_URL}"
-        f"{endpoint}"
-    )
-
-    headers = {
-        "accept": "application/json",
-        "user-agent": (
-            f"{config.ENGINE_NAME}/"
-            f"{config.ENGINE_VERSION}"
-        ),
-    }
-
-    for attempt in range(
-        1,
-        MAX_RETRIES + 1,
-    ):
-
-        try:
-
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-            )
-
-            if response.status_code == 200:
-
-                try:
-
-                    return response.json()
-
-                except ValueError:
-
-                    print(
-                        "[market_data] "
-                        "Resposta JSON inválida "
-                        "da CoinGecko."
-                    )
-
-            elif response.status_code == 429:
-
-                wait = (
-                    RETRY_BACKOFF_SECONDS
-                    * attempt
-                    * 3
-                )
-
-                print(
-                    "[market_data] "
-                    "Rate limit CoinGecko. "
-                    f"Tentativa {attempt}/"
-                    f"{MAX_RETRIES}. "
-                    f"Aguardando {wait}s."
-                )
-
-                time.sleep(
-                    wait
-                )
-
-                continue
-
-            elif response.status_code in {
-                401,
-                403,
-            }:
-
-                print(
-                    "[market_data] "
-                    "CoinGecko recusou a requisição: "
-                    f"HTTP {response.status_code}. "
-                    f"{response.text[:300]}"
-                )
-
-                return None
-
-            elif (
-                500
-                <= response.status_code
-                < 600
-            ):
-
-                wait = (
-                    RETRY_BACKOFF_SECONDS
-                    * attempt
-                )
-
-                print(
-                    "[market_data] "
-                    f"CoinGecko HTTP "
-                    f"{response.status_code}. "
-                    f"Tentativa {attempt}/"
-                    f"{MAX_RETRIES}. "
-                    f"Retry em {wait}s."
-                )
-
-                time.sleep(
-                    wait
-                )
-
-                continue
-
-            else:
-
-                print(
-                    "[market_data] "
-                    f"CoinGecko HTTP "
-                    f"{response.status_code}: "
-                    f"{response.text[:300]}"
-                )
-
-                return None
-
-        except requests.RequestException as exc:
-
-            if attempt == MAX_RETRIES:
-
-                print(
-                    "[market_data] "
-                    "Falha definitiva CoinGecko: "
-                    f"{exc}"
-                )
-
-                return None
-
-            wait = (
-                RETRY_BACKOFF_SECONDS
-                * attempt
-            )
-
-            print(
-                "[market_data] "
-                "Erro de conexão. "
-                f"Tentativa {attempt}/"
-                f"{MAX_RETRIES}. "
-                f"Retry em {wait}s."
-            )
-
-            time.sleep(
-                wait
-            )
-
-    return None
 
 
 # ============================================================
@@ -360,6 +227,161 @@ def _safe_divide(
         numerator
         / denominator
     )
+
+
+def _headers() -> Dict[str, str]:
+
+    return {
+        "accept":
+            "application/json",
+
+        "user-agent":
+            (
+                "Mozilla/5.0 "
+                "(X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+    }
+
+
+# ============================================================
+# HTTP GENERIC
+# ============================================================
+
+def _http_get(
+    url: str,
+    params: Optional[Dict] = None,
+    provider: str = "API",
+) -> Optional[object]:
+
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
+
+        try:
+
+            response = requests.get(
+                url,
+                params=params,
+                headers=_headers(),
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            if response.status_code == 200:
+
+                try:
+
+                    return response.json()
+
+                except ValueError:
+
+                    print(
+                        f"[market_data] "
+                        f"{provider}: JSON inválido."
+                    )
+
+            elif response.status_code == 429:
+
+                wait = (
+                    RETRY_BACKOFF_SECONDS
+                    * attempt
+                    * 3
+                )
+
+                print(
+                    f"[market_data] "
+                    f"{provider}: HTTP 429. "
+                    f"Tentativa {attempt}/"
+                    f"{MAX_RETRIES}. "
+                    f"Aguardando {wait}s."
+                )
+
+                time.sleep(
+                    wait
+                )
+
+                continue
+
+            elif response.status_code in {
+                401,
+                403,
+            }:
+
+                print(
+                    f"[market_data] "
+                    f"{provider}: "
+                    f"HTTP {response.status_code}. "
+                    "Acesso recusado."
+                )
+
+                return None
+
+            elif (
+                500
+                <= response.status_code
+                < 600
+            ):
+
+                wait = (
+                    RETRY_BACKOFF_SECONDS
+                    * attempt
+                )
+
+                print(
+                    f"[market_data] "
+                    f"{provider}: "
+                    f"HTTP {response.status_code}. "
+                    f"Retry em {wait}s."
+                )
+
+                time.sleep(
+                    wait
+                )
+
+                continue
+
+            else:
+
+                print(
+                    f"[market_data] "
+                    f"{provider}: "
+                    f"HTTP {response.status_code}. "
+                    f"{response.text[:200]}"
+                )
+
+                return None
+
+        except requests.RequestException as exc:
+
+            if attempt == MAX_RETRIES:
+
+                print(
+                    f"[market_data] "
+                    f"{provider}: "
+                    f"falha definitiva: {exc}"
+                )
+
+                return None
+
+            wait = (
+                RETRY_BACKOFF_SECONDS
+                * attempt
+            )
+
+            print(
+                f"[market_data] "
+                f"{provider}: erro de conexão. "
+                f"Retry em {wait}s."
+            )
+
+            time.sleep(
+                wait
+            )
+
+    return None
 
 
 # ============================================================
@@ -440,14 +462,73 @@ def is_wrapped_asset(
     )
 
 
+def _asset_allowed(
+    symbol: str,
+    name: str,
+    market_cap: float,
+    daily_volume: float,
+) -> bool:
+
+    if not symbol:
+        return False
+
+    if is_excluded_symbol(
+        symbol
+    ):
+        return False
+
+    if (
+        config.EXCLUDE_STABLECOINS
+        and is_stablecoin(
+            symbol,
+            name,
+        )
+    ):
+        return False
+
+    if (
+        config.EXCLUDE_WRAPPED_ASSETS
+        and is_wrapped_asset(
+            symbol,
+            name,
+        )
+    ):
+        return False
+
+    if (
+        pd.isna(
+            market_cap
+        )
+        or market_cap
+        < config.MIN_MARKET_CAP_USD
+    ):
+        return False
+
+    if (
+        pd.isna(
+            daily_volume
+        )
+        or daily_volume
+        < config.MIN_DAILY_VOLUME_USD
+    ):
+        return False
+
+    return True
+
+
 # ============================================================
-# UNIVERSO COINGECKO
+# COINGECKO
 # ============================================================
 
-def fetch_market_page(
+def fetch_coingecko_market_page(
     page: int,
     per_page: int = 250,
 ) -> List[Dict]:
+
+    url = (
+        f"{COINGECKO_BASE_URL}"
+        "/coins/markets"
+    )
 
     params = {
         "vs_currency":
@@ -469,9 +550,10 @@ def fetch_market_page(
             "24h,7d,30d",
     }
 
-    data = _request(
-        "/coins/markets",
+    data = _http_get(
+        url=url,
         params=params,
+        provider="CoinGecko",
     )
 
     if not isinstance(
@@ -479,18 +561,12 @@ def fetch_market_page(
         list,
     ):
 
-        print(
-            "[market_data] "
-            f"Página {page} não retornou "
-            "uma lista válida."
-        )
-
         return []
 
     return data
 
 
-def fetch_market_universe() -> pd.DataFrame:
+def fetch_coingecko_universe() -> pd.DataFrame:
 
     target = (
         config.UNIVERSE_MAX_ASSETS
@@ -514,22 +590,18 @@ def fetch_market_universe() -> pd.DataFrame:
 
         print(
             "[market_data] "
-            f"Coletando página "
+            f"CoinGecko página "
             f"{page}/{pages}..."
         )
 
-        data = fetch_market_page(
-            page=page,
-            per_page=per_page,
+        data = (
+            fetch_coingecko_market_page(
+                page=page,
+                per_page=per_page,
+            )
         )
 
         if not data:
-
-            print(
-                "[market_data] "
-                f"Página {page} vazia."
-            )
-
             break
 
         records.extend(
@@ -545,22 +617,15 @@ def fetch_market_universe() -> pd.DataFrame:
             1.2
         )
 
-    records = records[
-        :target
-    ]
-
     if not records:
-
-        print(
-            "[market_data] "
-            "CoinGecko não retornou ativos."
-        )
 
         return _empty_market_dataframe()
 
     rows = []
 
-    for coin in records:
+    for coin in records[
+        :target
+    ]:
 
         symbol = str(
             coin.get(
@@ -583,35 +648,6 @@ def fetch_market_universe() -> pd.DataFrame:
             )
         ).strip()
 
-        if (
-            not symbol
-            or not coin_id
-        ):
-            continue
-
-        if is_excluded_symbol(
-            symbol
-        ):
-            continue
-
-        if (
-            config.EXCLUDE_STABLECOINS
-            and is_stablecoin(
-                symbol,
-                name,
-            )
-        ):
-            continue
-
-        if (
-            config.EXCLUDE_WRAPPED_ASSETS
-            and is_wrapped_asset(
-                symbol,
-                name,
-            )
-        ):
-            continue
-
         market_cap = _safe_float(
             coin.get(
                 "market_cap"
@@ -624,22 +660,13 @@ def fetch_market_universe() -> pd.DataFrame:
             )
         )
 
-        if (
-            pd.isna(
-                market_cap
-            )
-            or market_cap
-            < config.MIN_MARKET_CAP_USD
+        if not _asset_allowed(
+            symbol=symbol,
+            name=name,
+            market_cap=market_cap,
+            daily_volume=daily_volume,
         ):
-            continue
 
-        if (
-            pd.isna(
-                daily_volume
-            )
-            or daily_volume
-            < config.MIN_DAILY_VOLUME_USD
-        ):
             continue
 
         circulating_supply = (
@@ -669,20 +696,6 @@ def fetch_market_universe() -> pd.DataFrame:
         fdv = _safe_float(
             coin.get(
                 "fully_diluted_valuation"
-            )
-        )
-
-        market_cap_fdv_ratio = (
-            _safe_divide(
-                market_cap,
-                fdv,
-            )
-        )
-
-        circulating_total_ratio = (
-            _safe_divide(
-                circulating_supply,
-                total_supply,
             )
         )
 
@@ -728,10 +741,16 @@ def fetch_market_universe() -> pd.DataFrame:
                     max_supply,
 
                 "market_cap_fdv_ratio":
-                    market_cap_fdv_ratio,
+                    _safe_divide(
+                        market_cap,
+                        fdv,
+                    ),
 
                 "circulating_total_ratio":
-                    circulating_total_ratio,
+                    _safe_divide(
+                        circulating_supply,
+                        total_supply,
+                    ),
 
                 "ath":
                     _safe_float(
@@ -779,16 +798,306 @@ def fetch_market_universe() -> pd.DataFrame:
                     coin.get(
                         "last_updated"
                     ),
+
+                "market_source":
+                    "COINGECKO",
             }
         )
 
     if not rows:
 
+        return _empty_market_dataframe()
+
+    return pd.DataFrame(
+        rows,
+        columns=MARKET_COLUMNS,
+    )
+
+
+# ============================================================
+# COINPAPRIKA FALLBACK
+# ============================================================
+
+def fetch_coinpaprika_tickers() -> List[Dict]:
+
+    url = (
+        f"{COINPAPRIKA_BASE_URL}"
+        "/tickers"
+    )
+
+    data = _http_get(
+        url=url,
+        params={
+            "quotes":
+                config.BASE_CURRENCY.upper(),
+        },
+        provider="CoinPaprika",
+    )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+
+        return []
+
+    return data
+
+
+def fetch_coinpaprika_universe() -> pd.DataFrame:
+
+    print(
+        "[market_data] "
+        "Ativando fallback CoinPaprika..."
+    )
+
+    records = (
+        fetch_coinpaprika_tickers()
+    )
+
+    if not records:
+
         print(
             "[market_data] "
-            "Nenhum ativo passou pelos "
-            "filtros de mercado."
+            "CoinPaprika não retornou ativos."
         )
+
+        return _empty_market_dataframe()
+
+    quote_currency = (
+        config.BASE_CURRENCY.upper()
+    )
+
+    rows = []
+
+    for coin in records:
+
+        quotes = coin.get(
+            "quotes",
+            {},
+        )
+
+        if not isinstance(
+            quotes,
+            dict,
+        ):
+            continue
+
+        quote = quotes.get(
+            quote_currency,
+            {},
+        )
+
+        if not isinstance(
+            quote,
+            dict,
+        ):
+            continue
+
+        symbol = str(
+            coin.get(
+                "symbol",
+                "",
+            )
+        ).upper().strip()
+
+        name = str(
+            coin.get(
+                "name",
+                "",
+            )
+        ).strip()
+
+        coin_id = str(
+            coin.get(
+                "id",
+                "",
+            )
+        ).strip()
+
+        if (
+            not coin_id
+            or not symbol
+        ):
+            continue
+
+        market_cap = _safe_float(
+            quote.get(
+                "market_cap"
+            )
+        )
+
+        daily_volume = _safe_float(
+            quote.get(
+                "volume_24h"
+            )
+        )
+
+        if not _asset_allowed(
+            symbol=symbol,
+            name=name,
+            market_cap=market_cap,
+            daily_volume=daily_volume,
+        ):
+
+            continue
+
+        circulating_supply = (
+            _safe_float(
+                coin.get(
+                    "circulating_supply"
+                )
+            )
+        )
+
+        total_supply = (
+            _safe_float(
+                coin.get(
+                    "total_supply"
+                )
+            )
+        )
+
+        max_supply = (
+            _safe_float(
+                coin.get(
+                    "max_supply"
+                )
+            )
+        )
+
+        price = _safe_float(
+            quote.get(
+                "price"
+            )
+        )
+
+        # CoinPaprika não fornece FDV diretamente
+        # no ticker básico.
+        # Quando max_supply ou total_supply existem,
+        # estimamos FDV por preço * supply máximo/total.
+        fdv_supply = max_supply
+
+        if (
+            pd.isna(
+                fdv_supply
+            )
+            or fdv_supply <= 0
+        ):
+
+            fdv_supply = (
+                total_supply
+            )
+
+        if (
+            not pd.isna(
+                price
+            )
+            and not pd.isna(
+                fdv_supply
+            )
+            and fdv_supply > 0
+        ):
+
+            fdv = (
+                price
+                * fdv_supply
+            )
+
+        else:
+
+            fdv = np.nan
+
+        rows.append(
+            {
+                "coin_id":
+                    coin_id,
+
+                "symbol":
+                    symbol,
+
+                "name":
+                    name,
+
+                "price":
+                    price,
+
+                "market_cap":
+                    market_cap,
+
+                "market_cap_rank":
+                    coin.get(
+                        "rank"
+                    ),
+
+                "fdv":
+                    fdv,
+
+                "daily_volume":
+                    daily_volume,
+
+                "circulating_supply":
+                    circulating_supply,
+
+                "total_supply":
+                    total_supply,
+
+                "max_supply":
+                    max_supply,
+
+                "market_cap_fdv_ratio":
+                    _safe_divide(
+                        market_cap,
+                        fdv,
+                    ),
+
+                "circulating_total_ratio":
+                    _safe_divide(
+                        circulating_supply,
+                        total_supply,
+                    ),
+
+                "ath":
+                    np.nan,
+
+                "ath_change_percentage":
+                    np.nan,
+
+                "atl":
+                    np.nan,
+
+                "price_change_24h":
+                    _safe_float(
+                        quote.get(
+                            "percent_change_24h"
+                        )
+                    ),
+
+                "price_change_7d":
+                    _safe_float(
+                        quote.get(
+                            "percent_change_7d"
+                        )
+                    ),
+
+                "price_change_30d":
+                    _safe_float(
+                        quote.get(
+                            "percent_change_30d"
+                        )
+                    ),
+
+                "last_updated":
+                    coin.get(
+                        "last_updated"
+                    ),
+
+                "market_source":
+                    "COINPAPRIKA",
+            }
+        )
+
+    if not rows:
 
         return _empty_market_dataframe()
 
@@ -797,39 +1106,117 @@ def fetch_market_universe() -> pd.DataFrame:
         columns=MARKET_COLUMNS,
     )
 
-    df = df.drop_duplicates(
-        subset=[
-            "coin_id"
-        ]
-    )
-
-    df = df.sort_values(
-        by="market_cap",
-        ascending=False,
-        na_position="last",
-    )
-
-    df = df.reset_index(
-        drop=True
+    df = (
+        df
+        .sort_values(
+            "market_cap",
+            ascending=False,
+            na_position="last",
+        )
+        .head(
+            config.UNIVERSE_MAX_ASSETS
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     print(
         "[market_data] "
-        "Ativos coletados após filtros: "
-        f"{len(df)}"
+        f"CoinPaprika: {len(df)} "
+        "ativos após filtros."
     )
 
     return df
 
 
 # ============================================================
-# HISTÓRICO DE PREÇO
+# UNIVERSO COM FAILOVER
 # ============================================================
 
-def fetch_price_history(
+def fetch_market_universe() -> pd.DataFrame:
+
+    print(
+        "[market_data] "
+        "Tentando CoinGecko..."
+    )
+
+    universe = (
+        fetch_coingecko_universe()
+    )
+
+    if not universe.empty:
+
+        print(
+            "[market_data] "
+            f"CoinGecko OK: "
+            f"{len(universe)} ativos."
+        )
+
+    else:
+
+        print(
+            "[market_data] "
+            "CoinGecko indisponível. "
+            "Tentando CoinPaprika."
+        )
+
+        universe = (
+            fetch_coinpaprika_universe()
+        )
+
+    if universe.empty:
+
+        print(
+            "[market_data] "
+            "Nenhuma fonte de market data "
+            "retornou universo válido."
+        )
+
+        return _empty_market_dataframe()
+
+    universe = (
+        universe
+        .drop_duplicates(
+            subset=[
+                "coin_id"
+            ]
+        )
+        .sort_values(
+            "market_cap",
+            ascending=False,
+            na_position="last",
+        )
+        .head(
+            config.UNIVERSE_MAX_ASSETS
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    print(
+        "[market_data] "
+        f"Universo bruto: "
+        f"{len(universe)} ativos."
+    )
+
+    return universe
+
+
+# ============================================================
+# COINGECKO HISTÓRICO
+# ============================================================
+
+def fetch_coingecko_price_history(
     coin_id: str,
     days: int = 365,
 ) -> pd.DataFrame:
+
+    url = (
+        f"{COINGECKO_BASE_URL}"
+        f"/coins/{coin_id}/market_chart"
+    )
 
     params = {
         "vs_currency":
@@ -842,9 +1229,10 @@ def fetch_price_history(
             "daily",
     }
 
-    data = _request(
-        f"/coins/{coin_id}/market_chart",
+    data = _http_get(
+        url=url,
         params=params,
+        provider="CoinGecko-History",
     )
 
     if not isinstance(
@@ -852,19 +1240,16 @@ def fetch_price_history(
         dict,
     ):
 
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "price",
-                "volume",
-                "historical_market_cap",
-            ]
-        )
+        return pd.DataFrame()
 
     prices = data.get(
         "prices",
         [],
     )
+
+    if not prices:
+
+        return pd.DataFrame()
 
     volumes = data.get(
         "total_volumes",
@@ -875,17 +1260,6 @@ def fetch_price_history(
         "market_caps",
         [],
     )
-
-    if not prices:
-
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "price",
-                "volume",
-                "historical_market_cap",
-            ]
-        )
 
     price_df = pd.DataFrame(
         prices,
@@ -937,7 +1311,7 @@ def fetch_price_history(
                 "date",
                 "volume",
             ]
-        ]
+        )
 
         price_df = price_df.merge(
             volume_df,
@@ -976,7 +1350,7 @@ def fetch_price_history(
                 "date",
                 "historical_market_cap",
             ]
-        ]
+        )
 
         price_df = price_df.merge(
             cap_df,
@@ -990,7 +1364,7 @@ def fetch_price_history(
             "historical_market_cap"
         ] = np.nan
 
-    price_df = (
+    return (
         price_df
         .sort_values(
             "date"
@@ -1005,7 +1379,195 @@ def fetch_price_history(
         )
     )
 
-    return price_df
+
+# ============================================================
+# COINPAPRIKA HISTÓRICO
+# ============================================================
+
+def fetch_coinpaprika_price_history(
+    coin_id: str,
+    days: int = 365,
+) -> pd.DataFrame:
+
+    end_date = datetime.now(
+        timezone.utc
+    ).date()
+
+    start_date = (
+        end_date
+        - timedelta(
+            days=days
+        )
+    )
+
+    url = (
+        f"{COINPAPRIKA_BASE_URL}"
+        f"/coins/{coin_id}"
+        "/ohlcv/historical"
+    )
+
+    params = {
+        "start":
+            start_date.isoformat(),
+
+        "end":
+            end_date.isoformat(),
+
+        "limit":
+            min(
+                days + 1,
+                366,
+            ),
+
+        "quote":
+            config.BASE_CURRENCY.lower(),
+    }
+
+    data = _http_get(
+        url=url,
+        params=params,
+        provider="CoinPaprika-History",
+    )
+
+    if not isinstance(
+        data,
+        list,
+    ):
+
+        return pd.DataFrame()
+
+    if not data:
+
+        return pd.DataFrame()
+
+    rows = []
+
+    for candle in data:
+
+        timestamp = (
+            candle.get(
+                "time_open"
+            )
+            or candle.get(
+                "time_close"
+            )
+        )
+
+        price = _safe_float(
+            candle.get(
+                "close"
+            )
+        )
+
+        volume = _safe_float(
+            candle.get(
+                "volume"
+            )
+        )
+
+        market_cap = _safe_float(
+            candle.get(
+                "market_cap"
+            )
+        )
+
+        if timestamp is None:
+            continue
+
+        rows.append(
+            {
+                "date":
+                    pd.to_datetime(
+                        timestamp,
+                        utc=True,
+                        errors="coerce",
+                    ),
+
+                "price":
+                    price,
+
+                "volume":
+                    volume,
+
+                "historical_market_cap":
+                    market_cap,
+            }
+        )
+
+    if not rows:
+
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        rows
+    )
+
+    df = df.dropna(
+        subset=[
+            "date"
+        ]
+    )
+
+    return (
+        df
+        .sort_values(
+            "date"
+        )
+        .drop_duplicates(
+            subset=[
+                "date"
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# HISTÓRICO COM FAILOVER
+# ============================================================
+
+def fetch_price_history(
+    coin_id: str,
+    days: int = 365,
+    preferred_source: Optional[str] = None,
+) -> pd.DataFrame:
+
+    preferred_source = str(
+        preferred_source
+        or ""
+    ).upper()
+
+    if preferred_source == "COINPAPRIKA":
+
+        history = (
+            fetch_coinpaprika_price_history(
+                coin_id=coin_id,
+                days=days,
+            )
+        )
+
+        if not history.empty:
+            return history
+
+        return pd.DataFrame()
+
+    history = (
+        fetch_coingecko_price_history(
+            coin_id=coin_id,
+            days=days,
+        )
+    )
+
+    if not history.empty:
+        return history
+
+    # IDs de CoinGecko e CoinPaprika não são
+    # necessariamente equivalentes.
+    # Portanto não fazemos fallback histórico
+    # usando um ID de outro provedor.
+    return pd.DataFrame()
 
 
 # ============================================================
@@ -1017,12 +1579,38 @@ def calculate_return(
     days: int,
 ) -> float:
 
-    if history.empty:
+    if (
+        history.empty
+        or "price"
+        not in history.columns
+        or "date"
+        not in history.columns
+    ):
+
         return np.nan
+
+    history = history.copy()
+
+    history[
+        "price"
+    ] = pd.to_numeric(
+        history[
+            "price"
+        ],
+        errors="coerce",
+    )
+
+    history = history.dropna(
+        subset=[
+            "date",
+            "price",
+        ]
+    )
 
     if len(
         history
     ) < 2:
+
         return np.nan
 
     current_price = _safe_float(
@@ -1085,11 +1673,9 @@ def calculate_drawdown(
     history: pd.DataFrame,
 ) -> float:
 
-    if history.empty:
-        return np.nan
-
     if (
-        "price"
+        history.empty
+        or "price"
         not in history.columns
     ):
 
@@ -1131,27 +1717,29 @@ def calculate_price_metrics(
     history: pd.DataFrame,
 ) -> Dict[str, float]:
 
+    empty_metrics = {
+        "return_30d":
+            np.nan,
+
+        "return_90d":
+            np.nan,
+
+        "return_180d":
+            np.nan,
+
+        "return_365d":
+            np.nan,
+
+        "drawdown_365d":
+            np.nan,
+
+        "volume_growth_30d":
+            np.nan,
+    }
+
     if history.empty:
 
-        return {
-            "return_30d":
-                np.nan,
-
-            "return_90d":
-                np.nan,
-
-            "return_180d":
-                np.nan,
-
-            "return_365d":
-                np.nan,
-
-            "drawdown_365d":
-                np.nan,
-
-            "volume_growth_30d":
-                np.nan,
-        }
+        return empty_metrics
 
     metrics = {
         "return_30d":
@@ -1192,13 +1780,11 @@ def calculate_price_metrics(
         ) >= 60
     ):
 
-        volume_series = (
-            pd.to_numeric(
-                history[
-                    "volume"
-                ],
-                errors="coerce",
-            )
+        volume_series = pd.to_numeric(
+            history[
+                "volume"
+            ],
+            errors="coerce",
         )
 
         recent = (
@@ -1277,7 +1863,7 @@ def calculate_price_underreaction(
 
 
 # ============================================================
-# ENRIQUECIMENTO DO UNIVERSO
+# HISTORICAL ENRICHMENT
 # ============================================================
 
 def enrich_with_price_history(
@@ -1325,27 +1911,37 @@ def enrich_with_price_history(
         start=1,
     ):
 
-        coin_id = row[
+        coin_id = row.get(
             "coin_id"
-        ]
+        )
 
-        symbol = row[
-            "symbol"
-        ]
+        symbol = row.get(
+            "symbol",
+            "UNKNOWN",
+        )
+
+        source = row.get(
+            "market_source",
+            "",
+        )
 
         print(
             "[market_data] "
             f"Histórico {symbol} "
-            f"({position}/{total})"
+            f"({position}/{total}) "
+            f"[{source}]"
         )
 
         history = fetch_price_history(
             coin_id=coin_id,
             days=days,
+            preferred_source=source,
         )
 
-        metrics = calculate_price_metrics(
-            history
+        metrics = (
+            calculate_price_metrics(
+                history
+            )
         )
 
         metrics[
@@ -1357,7 +1953,7 @@ def enrich_with_price_history(
         )
 
         time.sleep(
-            1.2
+            0.4
         )
 
     if not metrics_records:
@@ -1436,27 +2032,17 @@ def apply_data_quality(
 
         result = df.copy()
 
-        if (
+        result[
             "market_data_completeness"
-            not in result.columns
-        ):
+        ] = pd.Series(
+            dtype="float64"
+        )
 
-            result[
-                "market_data_completeness"
-            ] = pd.Series(
-                dtype="float64"
-            )
-
-        if (
+        result[
             "market_data_quality_pass"
-            not in result.columns
-        ):
-
-            result[
-                "market_data_quality_pass"
-            ] = pd.Series(
-                dtype="bool"
-            )
+        ] = pd.Series(
+            dtype="bool"
+        )
 
         return result
 
@@ -1503,24 +2089,27 @@ def build_market_dataset(
 
         print(
             "[market_data] "
-            "Universo vazio."
+            "Universo vazio após todas "
+            "as fontes de dados."
         )
 
         return _empty_market_dataframe(
             include_history=include_history
         )
 
-    universe = apply_data_quality(
-        universe
+    universe = (
+        apply_data_quality(
+            universe
+        )
     )
 
-    universe = universe[
+    passed = universe[
         universe[
             "market_data_quality_pass"
         ]
     ].copy()
 
-    if universe.empty:
+    if passed.empty:
 
         print(
             "[market_data] "
@@ -1528,9 +2117,27 @@ def build_market_dataset(
             "controle de qualidade."
         )
 
+        print(
+            "[market_data] "
+            "Distribuição de completeness:"
+        )
+
+        print(
+            universe[
+                "market_data_completeness"
+            ]
+            .value_counts(
+                dropna=False
+            )
+            .sort_index()
+            .to_string()
+        )
+
         return _empty_market_dataframe(
             include_history=include_history
         )
+
+    universe = passed
 
     if include_history:
 
@@ -1542,14 +2149,32 @@ def build_market_dataset(
             )
         )
 
-    universe = universe.reset_index(
-        drop=True
+    universe = (
+        universe
+        .reset_index(
+            drop=True
+        )
+    )
+
+    source_counts = (
+        universe[
+            "market_source"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .to_dict()
     )
 
     print(
         "[market_data] "
         f"Universo elegível: "
         f"{len(universe)} ativos."
+    )
+
+    print(
+        "[market_data] "
+        f"Fontes: {source_counts}"
     )
 
     return universe
@@ -1572,7 +2197,7 @@ if __name__ == "__main__":
         )
 
         print(
-            "Colunas preservadas:"
+            "Colunas:"
         )
 
         print(
@@ -1597,6 +2222,7 @@ if __name__ == "__main__":
             "market_cap_fdv_ratio",
             "market_data_completeness",
             "market_data_quality_pass",
+            "market_source",
         ]
 
         available_columns = [
