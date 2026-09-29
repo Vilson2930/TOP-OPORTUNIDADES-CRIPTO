@@ -8,21 +8,14 @@ Fonte principal:
 Fallback automático:
 - CoinPaprika
 
-Objetivo:
+Responsável por:
 - Construir o universo inicial.
 - Excluir BTC.
 - Excluir stablecoins.
 - Excluir wrapped assets.
 - Coletar preço, market cap, FDV, volume e supply.
 - Calcular retornos e drawdown.
-- Manter exatamente a estrutura esperada pelos demais engines.
-
-IMPORTANTE:
-Se CoinGecko responder 403, 429 ou ficar indisponível,
-o engine tenta automaticamente CoinPaprika.
-
-A CoinPaprika disponibiliza /v1/tickers sem necessidade de API key
-para o fluxo básico de market data.
+- Manter estrutura compatível com os demais engines.
 """
 
 from __future__ import annotations
@@ -42,13 +35,8 @@ import config
 # APIs
 # ============================================================
 
-COINGECKO_BASE_URL = (
-    "https://api.coingecko.com/api/v3"
-)
-
-COINPAPRIKA_BASE_URL = (
-    "https://api.coinpaprika.com/v1"
-)
+COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
+COINPAPRIKA_BASE_URL = "https://api.coinpaprika.com/v1"
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 4
@@ -153,9 +141,7 @@ def _empty_market_dataframe(
     include_history: bool = False,
 ) -> pd.DataFrame:
 
-    columns = list(
-        MARKET_COLUMNS
-    )
+    columns = list(MARKET_COLUMNS)
 
     columns.extend(
         [
@@ -165,44 +151,26 @@ def _empty_market_dataframe(
     )
 
     if include_history:
+        columns.extend(HISTORY_METRIC_COLUMNS)
 
-        columns.extend(
-            HISTORY_METRIC_COLUMNS
-        )
+    columns = list(dict.fromkeys(columns))
 
-    columns = list(
-        dict.fromkeys(
-            columns
-        )
-    )
-
-    return pd.DataFrame(
-        columns=columns
-    )
+    return pd.DataFrame(columns=columns)
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def _safe_float(
-    value,
-) -> float:
+def _safe_float(value) -> float:
 
     try:
-
         if value is None:
             return np.nan
 
-        return float(
-            value
-        )
+        return float(value)
 
-    except (
-        TypeError,
-        ValueError,
-    ):
-
+    except (TypeError, ValueError):
         return np.nan
 
 
@@ -212,42 +180,31 @@ def _safe_divide(
 ) -> float:
 
     if (
-        pd.isna(
-            numerator
-        )
-        or pd.isna(
-            denominator
-        )
+        pd.isna(numerator)
+        or pd.isna(denominator)
         or denominator == 0
     ):
-
         return np.nan
 
-    return (
-        numerator
-        / denominator
-    )
+    return numerator / denominator
 
 
 def _headers() -> Dict[str, str]:
 
     return {
-        "accept":
-            "application/json",
-
-        "user-agent":
-            (
-                "Mozilla/5.0 "
-                "(X11; Linux x86_64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
+        "accept": "application/json",
+        "user-agent": (
+            "Mozilla/5.0 "
+            "(X11; Linux x86_64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
     }
 
 
 # ============================================================
-# HTTP GENERIC
+# HTTP
 # ============================================================
 
 def _http_get(
@@ -256,10 +213,7 @@ def _http_get(
     provider: str = "API",
 ) -> Optional[object]:
 
-    for attempt in range(
-        1,
-        MAX_RETRIES + 1,
-    ):
+    for attempt in range(1, MAX_RETRIES + 1):
 
         try:
 
@@ -273,11 +227,9 @@ def _http_get(
             if response.status_code == 200:
 
                 try:
-
                     return response.json()
 
                 except ValueError:
-
                     print(
                         f"[market_data] "
                         f"{provider}: JSON inválido."
@@ -294,21 +246,14 @@ def _http_get(
                 print(
                     f"[market_data] "
                     f"{provider}: HTTP 429. "
-                    f"Tentativa {attempt}/"
-                    f"{MAX_RETRIES}. "
+                    f"Tentativa {attempt}/{MAX_RETRIES}. "
                     f"Aguardando {wait}s."
                 )
 
-                time.sleep(
-                    wait
-                )
-
+                time.sleep(wait)
                 continue
 
-            elif response.status_code in {
-                401,
-                403,
-            }:
+            elif response.status_code in {401, 403}:
 
                 print(
                     f"[market_data] "
@@ -319,11 +264,7 @@ def _http_get(
 
                 return None
 
-            elif (
-                500
-                <= response.status_code
-                < 600
-            ):
+            elif 500 <= response.status_code < 600:
 
                 wait = (
                     RETRY_BACKOFF_SECONDS
@@ -337,10 +278,7 @@ def _http_get(
                     f"Retry em {wait}s."
                 )
 
-                time.sleep(
-                    wait
-                )
-
+                time.sleep(wait)
                 continue
 
             else:
@@ -377,9 +315,7 @@ def _http_get(
                 f"Retry em {wait}s."
             )
 
-            time.sleep(
-                wait
-            )
+            time.sleep(wait)
 
     return None
 
@@ -388,18 +324,11 @@ def _http_get(
 # FILTROS
 # ============================================================
 
-def is_excluded_symbol(
-    symbol: str,
-) -> bool:
+def is_excluded_symbol(symbol: str) -> bool:
 
-    symbol = str(
-        symbol
-    ).upper().strip()
+    symbol = str(symbol).upper().strip()
 
-    return (
-        symbol
-        in config.EXCLUDED_SYMBOLS
-    )
+    return symbol in config.EXCLUDED_SYMBOLS
 
 
 def is_stablecoin(
@@ -407,13 +336,8 @@ def is_stablecoin(
     name: str = "",
 ) -> bool:
 
-    symbol = str(
-        symbol
-    ).upper().strip()
-
-    name = str(
-        name
-    ).lower().strip()
+    symbol = str(symbol).upper().strip()
+    name = str(name).lower().strip()
 
     if symbol in STABLECOIN_SYMBOLS:
         return True
@@ -436,13 +360,8 @@ def is_wrapped_asset(
     name: str = "",
 ) -> bool:
 
-    symbol = str(
-        symbol
-    ).upper().strip()
-
-    name = str(
-        name
-    ).lower().strip()
+    symbol = str(symbol).upper().strip()
+    name = str(name).lower().strip()
 
     if symbol in WRAPPED_SYMBOLS:
         return True
@@ -472,9 +391,7 @@ def _asset_allowed(
     if not symbol:
         return False
 
-    if is_excluded_symbol(
-        symbol
-    ):
+    if is_excluded_symbol(symbol):
         return False
 
     if (
@@ -496,20 +413,14 @@ def _asset_allowed(
         return False
 
     if (
-        pd.isna(
-            market_cap
-        )
-        or market_cap
-        < config.MIN_MARKET_CAP_USD
+        pd.isna(market_cap)
+        or market_cap < config.MIN_MARKET_CAP_USD
     ):
         return False
 
     if (
-        pd.isna(
-            daily_volume
-        )
-        or daily_volume
-        < config.MIN_DAILY_VOLUME_USD
+        pd.isna(daily_volume)
+        or daily_volume < config.MIN_DAILY_VOLUME_USD
     ):
         return False
 
@@ -531,23 +442,12 @@ def fetch_coingecko_market_page(
     )
 
     params = {
-        "vs_currency":
-            config.BASE_CURRENCY.lower(),
-
-        "order":
-            "market_cap_desc",
-
-        "per_page":
-            per_page,
-
-        "page":
-            page,
-
-        "sparkline":
-            "false",
-
-        "price_change_percentage":
-            "24h,7d,30d",
+        "vs_currency": config.BASE_CURRENCY.lower(),
+        "order": "market_cap_desc",
+        "per_page": per_page,
+        "page": page,
+        "sparkline": "false",
+        "price_change_percentage": "24h,7d,30d",
     }
 
     data = _http_get(
@@ -556,11 +456,7 @@ def fetch_coingecko_market_page(
         provider="CoinGecko",
     )
 
-    if not isinstance(
-        data,
-        list,
-    ):
-
+    if not isinstance(data, list):
         return []
 
     return data
@@ -568,25 +464,18 @@ def fetch_coingecko_market_page(
 
 def fetch_coingecko_universe() -> pd.DataFrame:
 
-    target = (
-        config.UNIVERSE_MAX_ASSETS
-    )
-
+    target = config.UNIVERSE_MAX_ASSETS
     per_page = 250
 
     pages = int(
         np.ceil(
-            target
-            / per_page
+            target / per_page
         )
     )
 
     records: List[Dict] = []
 
-    for page in range(
-        1,
-        pages + 1,
-    ):
+    for page in range(1, pages + 1):
 
         print(
             "[market_data] "
@@ -594,38 +483,27 @@ def fetch_coingecko_universe() -> pd.DataFrame:
             f"{page}/{pages}..."
         )
 
-        data = (
-            fetch_coingecko_market_page(
-                page=page,
-                per_page=per_page,
-            )
+        data = fetch_coingecko_market_page(
+            page=page,
+            per_page=per_page,
         )
 
         if not data:
             break
 
-        records.extend(
-            data
-        )
+        records.extend(data)
 
-        if len(
-            records
-        ) >= target:
+        if len(records) >= target:
             break
 
-        time.sleep(
-            1.2
-        )
+        time.sleep(1.2)
 
     if not records:
-
         return _empty_market_dataframe()
 
     rows = []
 
-    for coin in records[
-        :target
-    ]:
+    for coin in records[:target]:
 
         symbol = str(
             coin.get(
@@ -648,16 +526,15 @@ def fetch_coingecko_universe() -> pd.DataFrame:
             )
         ).strip()
 
+        if not coin_id:
+            continue
+
         market_cap = _safe_float(
-            coin.get(
-                "market_cap"
-            )
+            coin.get("market_cap")
         )
 
         daily_volume = _safe_float(
-            coin.get(
-                "total_volume"
-            )
+            coin.get("total_volume")
         )
 
         if not _asset_allowed(
@@ -666,31 +543,18 @@ def fetch_coingecko_universe() -> pd.DataFrame:
             market_cap=market_cap,
             daily_volume=daily_volume,
         ):
-
             continue
 
-        circulating_supply = (
-            _safe_float(
-                coin.get(
-                    "circulating_supply"
-                )
-            )
+        circulating_supply = _safe_float(
+            coin.get("circulating_supply")
         )
 
-        total_supply = (
-            _safe_float(
-                coin.get(
-                    "total_supply"
-                )
-            )
+        total_supply = _safe_float(
+            coin.get("total_supply")
         )
 
-        max_supply = (
-            _safe_float(
-                coin.get(
-                    "max_supply"
-                )
-            )
+        max_supply = _safe_float(
+            coin.get("max_supply")
         )
 
         fdv = _safe_float(
@@ -701,111 +565,63 @@ def fetch_coingecko_universe() -> pd.DataFrame:
 
         rows.append(
             {
-                "coin_id":
-                    coin_id,
-
-                "symbol":
-                    symbol,
-
-                "name":
-                    name,
-
-                "price":
-                    _safe_float(
-                        coin.get(
-                            "current_price"
-                        )
-                    ),
-
-                "market_cap":
+                "coin_id": coin_id,
+                "symbol": symbol,
+                "name": name,
+                "price": _safe_float(
+                    coin.get("current_price")
+                ),
+                "market_cap": market_cap,
+                "market_cap_rank": coin.get(
+                    "market_cap_rank"
+                ),
+                "fdv": fdv,
+                "daily_volume": daily_volume,
+                "circulating_supply": circulating_supply,
+                "total_supply": total_supply,
+                "max_supply": max_supply,
+                "market_cap_fdv_ratio": _safe_divide(
                     market_cap,
-
-                "market_cap_rank":
-                    coin.get(
-                        "market_cap_rank"
-                    ),
-
-                "fdv":
                     fdv,
-
-                "daily_volume":
-                    daily_volume,
-
-                "circulating_supply":
+                ),
+                "circulating_total_ratio": _safe_divide(
                     circulating_supply,
-
-                "total_supply":
                     total_supply,
-
-                "max_supply":
-                    max_supply,
-
-                "market_cap_fdv_ratio":
-                    _safe_divide(
-                        market_cap,
-                        fdv,
-                    ),
-
-                "circulating_total_ratio":
-                    _safe_divide(
-                        circulating_supply,
-                        total_supply,
-                    ),
-
-                "ath":
-                    _safe_float(
-                        coin.get(
-                            "ath"
-                        )
-                    ),
-
-                "ath_change_percentage":
-                    _safe_float(
-                        coin.get(
-                            "ath_change_percentage"
-                        )
-                    ),
-
-                "atl":
-                    _safe_float(
-                        coin.get(
-                            "atl"
-                        )
-                    ),
-
-                "price_change_24h":
-                    _safe_float(
-                        coin.get(
-                            "price_change_percentage_24h"
-                        )
-                    ),
-
-                "price_change_7d":
-                    _safe_float(
-                        coin.get(
-                            "price_change_percentage_7d_in_currency"
-                        )
-                    ),
-
-                "price_change_30d":
-                    _safe_float(
-                        coin.get(
-                            "price_change_percentage_30d_in_currency"
-                        )
-                    ),
-
-                "last_updated":
+                ),
+                "ath": _safe_float(
+                    coin.get("ath")
+                ),
+                "ath_change_percentage": _safe_float(
                     coin.get(
-                        "last_updated"
-                    ),
-
-                "market_source":
-                    "COINGECKO",
+                        "ath_change_percentage"
+                    )
+                ),
+                "atl": _safe_float(
+                    coin.get("atl")
+                ),
+                "price_change_24h": _safe_float(
+                    coin.get(
+                        "price_change_percentage_24h"
+                    )
+                ),
+                "price_change_7d": _safe_float(
+                    coin.get(
+                        "price_change_percentage_7d_in_currency"
+                    )
+                ),
+                "price_change_30d": _safe_float(
+                    coin.get(
+                        "price_change_percentage_30d_in_currency"
+                    )
+                ),
+                "last_updated": coin.get(
+                    "last_updated"
+                ),
+                "market_source": "COINGECKO",
             }
         )
 
     if not rows:
-
         return _empty_market_dataframe()
 
     return pd.DataFrame(
@@ -815,7 +631,7 @@ def fetch_coingecko_universe() -> pd.DataFrame:
 
 
 # ============================================================
-# COINPAPRIKA FALLBACK
+# COINPAPRIKA
 # ============================================================
 
 def fetch_coinpaprika_tickers() -> List[Dict]:
@@ -834,11 +650,7 @@ def fetch_coinpaprika_tickers() -> List[Dict]:
         provider="CoinPaprika",
     )
 
-    if not isinstance(
-        data,
-        list,
-    ):
-
+    if not isinstance(data, list):
         return []
 
     return data
@@ -851,9 +663,7 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
         "Ativando fallback CoinPaprika..."
     )
 
-    records = (
-        fetch_coinpaprika_tickers()
-    )
+    records = fetch_coinpaprika_tickers()
 
     if not records:
 
@@ -877,10 +687,7 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
             {},
         )
 
-        if not isinstance(
-            quotes,
-            dict,
-        ):
+        if not isinstance(quotes, dict):
             continue
 
         quote = quotes.get(
@@ -888,10 +695,7 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
             {},
         )
 
-        if not isinstance(
-            quote,
-            dict,
-        ):
+        if not isinstance(quote, dict):
             continue
 
         symbol = str(
@@ -915,22 +719,15 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
             )
         ).strip()
 
-        if (
-            not coin_id
-            or not symbol
-        ):
+        if not coin_id or not symbol:
             continue
 
         market_cap = _safe_float(
-            quote.get(
-                "market_cap"
-            )
+            quote.get("market_cap")
         )
 
         daily_volume = _safe_float(
-            quote.get(
-                "volume_24h"
-            )
+            quote.get("volume_24h")
         )
 
         if not _asset_allowed(
@@ -939,166 +736,90 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
             market_cap=market_cap,
             daily_volume=daily_volume,
         ):
-
             continue
 
-        circulating_supply = (
-            _safe_float(
-                coin.get(
-                    "circulating_supply"
-                )
-            )
+        circulating_supply = _safe_float(
+            coin.get("circulating_supply")
         )
 
-        total_supply = (
-            _safe_float(
-                coin.get(
-                    "total_supply"
-                )
-            )
+        total_supply = _safe_float(
+            coin.get("total_supply")
         )
 
-        max_supply = (
-            _safe_float(
-                coin.get(
-                    "max_supply"
-                )
-            )
+        max_supply = _safe_float(
+            coin.get("max_supply")
         )
 
         price = _safe_float(
-            quote.get(
-                "price"
-            )
+            quote.get("price")
         )
 
-        # CoinPaprika não fornece FDV diretamente
-        # no ticker básico.
-        # Quando max_supply ou total_supply existem,
-        # estimamos FDV por preço * supply máximo/total.
         fdv_supply = max_supply
 
         if (
-            pd.isna(
-                fdv_supply
-            )
+            pd.isna(fdv_supply)
             or fdv_supply <= 0
         ):
-
-            fdv_supply = (
-                total_supply
-            )
+            fdv_supply = total_supply
 
         if (
-            not pd.isna(
-                price
-            )
-            and not pd.isna(
-                fdv_supply
-            )
+            not pd.isna(price)
+            and not pd.isna(fdv_supply)
             and fdv_supply > 0
         ):
-
-            fdv = (
-                price
-                * fdv_supply
-            )
-
+            fdv = price * fdv_supply
         else:
-
             fdv = np.nan
 
         rows.append(
             {
-                "coin_id":
-                    coin_id,
-
-                "symbol":
-                    symbol,
-
-                "name":
-                    name,
-
-                "price":
-                    price,
-
-                "market_cap":
+                "coin_id": coin_id,
+                "symbol": symbol,
+                "name": name,
+                "price": price,
+                "market_cap": market_cap,
+                "market_cap_rank": coin.get(
+                    "rank"
+                ),
+                "fdv": fdv,
+                "daily_volume": daily_volume,
+                "circulating_supply": circulating_supply,
+                "total_supply": total_supply,
+                "max_supply": max_supply,
+                "market_cap_fdv_ratio": _safe_divide(
                     market_cap,
-
-                "market_cap_rank":
-                    coin.get(
-                        "rank"
-                    ),
-
-                "fdv":
                     fdv,
-
-                "daily_volume":
-                    daily_volume,
-
-                "circulating_supply":
+                ),
+                "circulating_total_ratio": _safe_divide(
                     circulating_supply,
-
-                "total_supply":
                     total_supply,
-
-                "max_supply":
-                    max_supply,
-
-                "market_cap_fdv_ratio":
-                    _safe_divide(
-                        market_cap,
-                        fdv,
-                    ),
-
-                "circulating_total_ratio":
-                    _safe_divide(
-                        circulating_supply,
-                        total_supply,
-                    ),
-
-                "ath":
-                    np.nan,
-
-                "ath_change_percentage":
-                    np.nan,
-
-                "atl":
-                    np.nan,
-
-                "price_change_24h":
-                    _safe_float(
-                        quote.get(
-                            "percent_change_24h"
-                        )
-                    ),
-
-                "price_change_7d":
-                    _safe_float(
-                        quote.get(
-                            "percent_change_7d"
-                        )
-                    ),
-
-                "price_change_30d":
-                    _safe_float(
-                        quote.get(
-                            "percent_change_30d"
-                        )
-                    ),
-
-                "last_updated":
-                    coin.get(
-                        "last_updated"
-                    ),
-
-                "market_source":
-                    "COINPAPRIKA",
+                ),
+                "ath": np.nan,
+                "ath_change_percentage": np.nan,
+                "atl": np.nan,
+                "price_change_24h": _safe_float(
+                    quote.get(
+                        "percent_change_24h"
+                    )
+                ),
+                "price_change_7d": _safe_float(
+                    quote.get(
+                        "percent_change_7d"
+                    )
+                ),
+                "price_change_30d": _safe_float(
+                    quote.get(
+                        "percent_change_30d"
+                    )
+                ),
+                "last_updated": coin.get(
+                    "last_updated"
+                ),
+                "market_source": "COINPAPRIKA",
             }
         )
 
     if not rows:
-
         return _empty_market_dataframe()
 
     df = pd.DataFrame(
@@ -1116,9 +837,7 @@ def fetch_coinpaprika_universe() -> pd.DataFrame:
         .head(
             config.UNIVERSE_MAX_ASSETS
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
     print(
@@ -1141,9 +860,7 @@ def fetch_market_universe() -> pd.DataFrame:
         "Tentando CoinGecko..."
     )
 
-    universe = (
-        fetch_coingecko_universe()
-    )
+    universe = fetch_coingecko_universe()
 
     if not universe.empty:
 
@@ -1161,9 +878,7 @@ def fetch_market_universe() -> pd.DataFrame:
             "Tentando CoinPaprika."
         )
 
-        universe = (
-            fetch_coinpaprika_universe()
-        )
+        universe = fetch_coinpaprika_universe()
 
     if universe.empty:
 
@@ -1178,9 +893,7 @@ def fetch_market_universe() -> pd.DataFrame:
     universe = (
         universe
         .drop_duplicates(
-            subset=[
-                "coin_id"
-            ]
+            subset=["coin_id"]
         )
         .sort_values(
             "market_cap",
@@ -1190,9 +903,7 @@ def fetch_market_universe() -> pd.DataFrame:
         .head(
             config.UNIVERSE_MAX_ASSETS
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
     print(
@@ -1205,7 +916,7 @@ def fetch_market_universe() -> pd.DataFrame:
 
 
 # ============================================================
-# COINGECKO HISTÓRICO
+# HISTÓRICO COINGECKO
 # ============================================================
 
 def fetch_coingecko_price_history(
@@ -1221,10 +932,8 @@ def fetch_coingecko_price_history(
     params = {
         "vs_currency":
             config.BASE_CURRENCY.lower(),
-
         "days":
             days,
-
         "interval":
             "daily",
     }
@@ -1235,11 +944,7 @@ def fetch_coingecko_price_history(
         provider="CoinGecko-History",
     )
 
-    if not isinstance(
-        data,
-        dict,
-    ):
-
+    if not isinstance(data, dict):
         return pd.DataFrame()
 
     prices = data.get(
@@ -1248,7 +953,6 @@ def fetch_coingecko_price_history(
     )
 
     if not prices:
-
         return pd.DataFrame()
 
     volumes = data.get(
@@ -1269,12 +973,8 @@ def fetch_coingecko_price_history(
         ],
     )
 
-    price_df[
-        "date"
-    ] = pd.to_datetime(
-        price_df[
-            "timestamp"
-        ],
+    price_df["date"] = pd.to_datetime(
+        price_df["timestamp"],
         unit="ms",
         utc=True,
     )
@@ -1296,12 +996,8 @@ def fetch_coingecko_price_history(
             ],
         )
 
-        volume_df[
-            "date"
-        ] = pd.to_datetime(
-            volume_df[
-                "timestamp"
-            ],
+        volume_df["date"] = pd.to_datetime(
+            volume_df["timestamp"],
             unit="ms",
             utc=True,
         )
@@ -1311,7 +1007,7 @@ def fetch_coingecko_price_history(
                 "date",
                 "volume",
             ]
-        )
+        ]
 
         price_df = price_df.merge(
             volume_df,
@@ -1320,10 +1016,7 @@ def fetch_coingecko_price_history(
         )
 
     else:
-
-        price_df[
-            "volume"
-        ] = np.nan
+        price_df["volume"] = np.nan
 
     if market_caps:
 
@@ -1335,12 +1028,8 @@ def fetch_coingecko_price_history(
             ],
         )
 
-        cap_df[
-            "date"
-        ] = pd.to_datetime(
-            cap_df[
-                "timestamp"
-            ],
+        cap_df["date"] = pd.to_datetime(
+            cap_df["timestamp"],
             unit="ms",
             utc=True,
         )
@@ -1350,7 +1039,7 @@ def fetch_coingecko_price_history(
                 "date",
                 "historical_market_cap",
             ]
-        )
+        ]
 
         price_df = price_df.merge(
             cap_df,
@@ -1359,29 +1048,22 @@ def fetch_coingecko_price_history(
         )
 
     else:
-
         price_df[
             "historical_market_cap"
         ] = np.nan
 
     return (
         price_df
-        .sort_values(
-            "date"
-        )
+        .sort_values("date")
         .drop_duplicates(
-            subset=[
-                "date"
-            ]
+            subset=["date"]
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
 
 # ============================================================
-# COINPAPRIKA HISTÓRICO
+# HISTÓRICO COINPAPRIKA
 # ============================================================
 
 def fetch_coinpaprika_price_history(
@@ -1395,9 +1077,7 @@ def fetch_coinpaprika_price_history(
 
     start_date = (
         end_date
-        - timedelta(
-            days=days
-        )
+        - timedelta(days=days)
     )
 
     url = (
@@ -1409,16 +1089,13 @@ def fetch_coinpaprika_price_history(
     params = {
         "start":
             start_date.isoformat(),
-
         "end":
             end_date.isoformat(),
-
         "limit":
             min(
                 days + 1,
                 366,
             ),
-
         "quote":
             config.BASE_CURRENCY.lower(),
     }
@@ -1429,15 +1106,10 @@ def fetch_coinpaprika_price_history(
         provider="CoinPaprika-History",
     )
 
-    if not isinstance(
-        data,
-        list,
-    ):
-
+    if not isinstance(data, list):
         return pd.DataFrame()
 
     if not data:
-
         return pd.DataFrame()
 
     rows = []
@@ -1445,30 +1117,8 @@ def fetch_coinpaprika_price_history(
     for candle in data:
 
         timestamp = (
-            candle.get(
-                "time_open"
-            )
-            or candle.get(
-                "time_close"
-            )
-        )
-
-        price = _safe_float(
-            candle.get(
-                "close"
-            )
-        )
-
-        volume = _safe_float(
-            candle.get(
-                "volume"
-            )
-        )
-
-        market_cap = _safe_float(
-            candle.get(
-                "market_cap"
-            )
+            candle.get("time_open")
+            or candle.get("time_close")
         )
 
         if timestamp is None:
@@ -1476,51 +1126,39 @@ def fetch_coinpaprika_price_history(
 
         rows.append(
             {
-                "date":
-                    pd.to_datetime(
-                        timestamp,
-                        utc=True,
-                        errors="coerce",
-                    ),
-
-                "price":
-                    price,
-
-                "volume":
-                    volume,
-
-                "historical_market_cap":
-                    market_cap,
+                "date": pd.to_datetime(
+                    timestamp,
+                    utc=True,
+                    errors="coerce",
+                ),
+                "price": _safe_float(
+                    candle.get("close")
+                ),
+                "volume": _safe_float(
+                    candle.get("volume")
+                ),
+                "historical_market_cap": _safe_float(
+                    candle.get("market_cap")
+                ),
             }
         )
 
     if not rows:
-
         return pd.DataFrame()
 
-    df = pd.DataFrame(
-        rows
-    )
+    df = pd.DataFrame(rows)
 
     df = df.dropna(
-        subset=[
-            "date"
-        ]
+        subset=["date"]
     )
 
     return (
         df
-        .sort_values(
-            "date"
-        )
+        .sort_values("date")
         .drop_duplicates(
-            subset=[
-                "date"
-            ]
+            subset=["date"]
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
 
 
@@ -1535,8 +1173,7 @@ def fetch_price_history(
 ) -> pd.DataFrame:
 
     preferred_source = str(
-        preferred_source
-        or ""
+        preferred_source or ""
     ).upper()
 
     if preferred_source == "COINPAPRIKA":
@@ -1563,10 +1200,6 @@ def fetch_price_history(
     if not history.empty:
         return history
 
-    # IDs de CoinGecko e CoinPaprika não são
-    # necessariamente equivalentes.
-    # Portanto não fazemos fallback histórico
-    # usando um ID de outro provedor.
     return pd.DataFrame()
 
 
@@ -1581,22 +1214,15 @@ def calculate_return(
 
     if (
         history.empty
-        or "price"
-        not in history.columns
-        or "date"
-        not in history.columns
+        or "price" not in history.columns
+        or "date" not in history.columns
     ):
-
         return np.nan
 
     history = history.copy()
 
-    history[
-        "price"
-    ] = pd.to_numeric(
-        history[
-            "price"
-        ],
+    history["price"] = pd.to_numeric(
+        history["price"],
         errors="coerce",
     )
 
@@ -1607,59 +1233,39 @@ def calculate_return(
         ]
     )
 
-    if len(
-        history
-    ) < 2:
-
+    if len(history) < 2:
         return np.nan
 
     current_price = _safe_float(
-        history[
-            "price"
-        ].iloc[-1]
+        history["price"].iloc[-1]
     )
 
     if (
-        pd.isna(
-            current_price
-        )
+        pd.isna(current_price)
         or current_price <= 0
     ):
-
         return np.nan
 
     target_date = (
-        history[
-            "date"
-        ].iloc[-1]
-        - pd.Timedelta(
-            days=days
-        )
+        history["date"].iloc[-1]
+        - pd.Timedelta(days=days)
     )
 
     historical = history[
-        history[
-            "date"
-        ]
-        <= target_date
+        history["date"] <= target_date
     ]
 
     if historical.empty:
         return np.nan
 
     old_price = _safe_float(
-        historical[
-            "price"
-        ].iloc[-1]
+        historical["price"].iloc[-1]
     )
 
     if (
-        pd.isna(
-            old_price
-        )
+        pd.isna(old_price)
         or old_price <= 0
     ):
-
         return np.nan
 
     return (
@@ -1675,16 +1281,12 @@ def calculate_drawdown(
 
     if (
         history.empty
-        or "price"
-        not in history.columns
+        or "price" not in history.columns
     ):
-
         return np.nan
 
     prices = pd.to_numeric(
-        history[
-            "price"
-        ],
+        history["price"],
         errors="coerce",
     ).dropna()
 
@@ -1692,18 +1294,12 @@ def calculate_drawdown(
         return np.nan
 
     peak = prices.max()
-
-    current = prices.iloc[
-        -1
-    ]
+    current = prices.iloc[-1]
 
     if (
-        pd.isna(
-            peak
-        )
+        pd.isna(peak)
         or peak <= 0
     ):
-
         return np.nan
 
     return (
@@ -1717,29 +1313,16 @@ def calculate_price_metrics(
     history: pd.DataFrame,
 ) -> Dict[str, float]:
 
-    empty_metrics = {
-        "return_30d":
-            np.nan,
-
-        "return_90d":
-            np.nan,
-
-        "return_180d":
-            np.nan,
-
-        "return_365d":
-            np.nan,
-
-        "drawdown_365d":
-            np.nan,
-
-        "volume_growth_30d":
-            np.nan,
-    }
-
     if history.empty:
 
-        return empty_metrics
+        return {
+            "return_30d": np.nan,
+            "return_90d": np.nan,
+            "return_180d": np.nan,
+            "return_365d": np.nan,
+            "drawdown_365d": np.nan,
+            "volume_growth_30d": np.nan,
+        }
 
     metrics = {
         "return_30d":
@@ -1747,25 +1330,21 @@ def calculate_price_metrics(
                 history,
                 30,
             ),
-
         "return_90d":
             calculate_return(
                 history,
                 90,
             ),
-
         "return_180d":
             calculate_return(
                 history,
                 180,
             ),
-
         "return_365d":
             calculate_return(
                 history,
                 365,
             ),
-
         "drawdown_365d":
             calculate_drawdown(
                 history
@@ -1773,43 +1352,30 @@ def calculate_price_metrics(
     }
 
     if (
-        "volume"
-        in history.columns
-        and len(
-            history
-        ) >= 60
+        "volume" in history.columns
+        and len(history) >= 60
     ):
 
         volume_series = pd.to_numeric(
-            history[
-                "volume"
-            ],
+            history["volume"],
             errors="coerce",
         )
 
         recent = (
             volume_series
-            .tail(
-                30
-            )
+            .tail(30)
             .mean()
         )
 
         previous = (
             volume_series
-            .iloc[
-                -60:-30
-            ]
+            .iloc[-60:-30]
             .mean()
         )
 
         if (
-            not pd.isna(
-                recent
-            )
-            and not pd.isna(
-                previous
-            )
+            not pd.isna(recent)
+            and not pd.isna(previous)
             and previous > 0
         ):
 
@@ -1846,14 +1412,9 @@ def calculate_price_underreaction(
 ) -> float:
 
     if (
-        pd.isna(
-            fundamental_change
-        )
-        or pd.isna(
-            price_change
-        )
+        pd.isna(fundamental_change)
+        or pd.isna(price_change)
     ):
-
         return np.nan
 
     return (
@@ -1863,7 +1424,7 @@ def calculate_price_underreaction(
 
 
 # ============================================================
-# HISTORICAL ENRICHMENT
+# ENRIQUECIMENTO HISTÓRICO
 # ============================================================
 
 def enrich_with_price_history(
@@ -1880,9 +1441,7 @@ def enrich_with_price_history(
 
             if column not in result.columns:
 
-                result[
-                    column
-                ] = pd.Series(
+                result[column] = pd.Series(
                     dtype="float64"
                 )
 
@@ -1891,20 +1450,13 @@ def enrich_with_price_history(
     df = universe.copy()
 
     if top_n is not None:
-
-        working = df.head(
-            top_n
-        ).copy()
-
+        working = df.head(top_n).copy()
     else:
-
         working = df.copy()
 
     metrics_records = []
 
-    total = len(
-        working
-    )
+    total = len(working)
 
     for position, (_, row) in enumerate(
         working.iterrows(),
@@ -1938,23 +1490,17 @@ def enrich_with_price_history(
             preferred_source=source,
         )
 
-        metrics = (
-            calculate_price_metrics(
-                history
-            )
+        metrics = calculate_price_metrics(
+            history
         )
 
-        metrics[
-            "coin_id"
-        ] = coin_id
+        metrics["coin_id"] = coin_id
 
         metrics_records.append(
             metrics
         )
 
-        time.sleep(
-            0.4
-        )
+        time.sleep(0.4)
 
     if not metrics_records:
 
@@ -1963,10 +1509,7 @@ def enrich_with_price_history(
         for column in HISTORY_METRIC_COLUMNS:
 
             if column not in result.columns:
-
-                result[
-                    column
-                ] = np.nan
+                result[column] = np.nan
 
         return result
 
@@ -2003,24 +1546,17 @@ def calculate_market_data_completeness(
 
     for field in required_fields:
 
-        value = row.get(
-            field
-        )
+        value = row.get(field)
 
         if (
             value is not None
-            and not pd.isna(
-                value
-            )
+            and not pd.isna(value)
         ):
-
             available += 1
 
     return (
         available
-        / len(
-            required_fields
-        )
+        / len(required_fields)
     )
 
 
@@ -2081,9 +1617,7 @@ def build_market_dataset(
         "Construindo universo..."
     )
 
-    universe = (
-        fetch_market_universe()
-    )
+    universe = fetch_market_universe()
 
     if universe.empty:
 
@@ -2097,10 +1631,8 @@ def build_market_dataset(
             include_history=include_history
         )
 
-    universe = (
-        apply_data_quality(
-            universe
-        )
+    universe = apply_data_quality(
+        universe
     )
 
     passed = universe[
@@ -2141,19 +1673,14 @@ def build_market_dataset(
 
     if include_history:
 
-        universe = (
-            enrich_with_price_history(
-                universe=universe,
-                top_n=history_top_n,
-                days=365,
-            )
+        universe = enrich_with_price_history(
+            universe=universe,
+            top_n=history_top_n,
+            days=365,
         )
 
-    universe = (
-        universe
-        .reset_index(
-            drop=True
-        )
+    universe = universe.reset_index(
+        drop=True
     )
 
     source_counts = (
@@ -2201,9 +1728,7 @@ if __name__ == "__main__":
         )
 
         print(
-            list(
-                dataset.columns
-            )
+            list(dataset.columns)
         )
 
     else:
@@ -2228,17 +1753,14 @@ if __name__ == "__main__":
         available_columns = [
             column
             for column in columns
-            if column
-            in dataset.columns
+            if column in dataset.columns
         ]
 
         print(
             dataset[
                 available_columns
             ]
-            .head(
-                30
-            )
+            .head(30)
             .to_string(
                 index=False
             )
