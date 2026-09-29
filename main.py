@@ -404,214 +404,112 @@ def split_universe_result(
     pd.DataFrame,
 ]:
 
-    if isinstance(
-        universe_result,
-        pd.DataFrame,
-    ):
-
+    if isinstance(universe_result, pd.DataFrame):
         dataset = universe_result.copy()
 
-        if (
-            "universe_eligible"
-            in dataset.columns
-        ):
+        if "universe_eligible" in dataset.columns:
+            eligible = dataset[dataset["universe_eligible"] == True].copy()
+            rejected = dataset[dataset["universe_eligible"] != True].copy()
+            return eligible, rejected
 
-            eligible = dataset[
-                dataset[
-                    "universe_eligible"
-                ]
-                == True
-            ].copy()
+        if "eligible" in dataset.columns:
+            eligible = dataset[dataset["eligible"] == True].copy()
+            rejected = dataset[dataset["eligible"] != True].copy()
+            return eligible, rejected
 
-            rejected = dataset[
-                dataset[
-                    "universe_eligible"
-                ]
-                != True
-            ].copy()
+        return dataset, pd.DataFrame()
 
-            return (
-                eligible,
-                rejected,
-            )
-
-        if (
-            "eligible"
-            in dataset.columns
-        ):
-
-            eligible = dataset[
-                dataset[
-                    "eligible"
-                ]
-                == True
-            ].copy()
-
-            rejected = dataset[
-                dataset[
-                    "eligible"
-                ]
-                != True
-            ].copy()
-
-            return (
-                eligible,
-                rejected,
-            )
-
-        return (
-            dataset,
-            pd.DataFrame(),
-        )
-
-    if isinstance(
-        universe_result,
-        dict,
-    ):
-
-        eligible = (
-            universe_result.get(
-                "eligible"
-            )
-        )
-
+    if isinstance(universe_result, dict):
+        eligible = universe_result.get("eligible")
         if eligible is None:
+            eligible = universe_result.get("eligible_universe")
 
-            eligible = (
-                universe_result.get(
-                    "eligible_universe"
-                )
-            )
-
-        rejected = (
-            universe_result.get(
-                "rejected"
-            )
-        )
-
+        rejected = universe_result.get("rejected")
         if rejected is None:
+            rejected = universe_result.get("rejected_universe")
 
-            rejected = (
-                universe_result.get(
-                    "rejected_universe"
-                )
-            )
-
-        if not isinstance(
-            eligible,
-            pd.DataFrame,
-        ):
-
+        if not isinstance(eligible, pd.DataFrame):
             eligible = pd.DataFrame()
-
-        if not isinstance(
-            rejected,
-            pd.DataFrame,
-        ):
-
+        if not isinstance(rejected, pd.DataFrame):
             rejected = pd.DataFrame()
 
-        return (
-            eligible.copy(),
-            rejected.copy(),
-        )
+        return eligible.copy(), rejected.copy()
 
-    if isinstance(
-        universe_result,
-        tuple,
-    ):
-
+    if isinstance(universe_result, tuple):
         frames = [
             item
             for item in universe_result
-            if isinstance(
-                item,
-                pd.DataFrame,
-            )
+            if isinstance(item, pd.DataFrame)
         ]
 
         if len(frames) >= 2:
-
             first = frames[0].copy()
             second = frames[1].copy()
 
-            # universe_engine may return (full_dataset, eligible_dataset).
-            # Detect that shape and derive rejected rows from the full dataset.
-            if len(first) >= len(second):
+            # Canonical universe_engine return:
+            # (eligible_dataframe, evaluated_dataframe, stats_dict)
+            if "universe_eligible" in second.columns:
+                eligible = second[second["universe_eligible"] == True].copy()
+                rejected = second[second["universe_eligible"] != True].copy()
+                return (
+                    eligible.reset_index(drop=True),
+                    rejected.reset_index(drop=True),
+                )
 
-                if (
-                    "universe_eligible" in first.columns
-                ):
+            if "eligible" in second.columns:
+                eligible = second[second["eligible"] == True].copy()
+                rejected = second[second["eligible"] != True].copy()
+                return (
+                    eligible.reset_index(drop=True),
+                    rejected.reset_index(drop=True),
+                )
 
-                    eligible = first[
-                        first["universe_eligible"] == True
+            # Compatibility with alternate tuple shapes.
+            if "universe_eligible" in first.columns:
+                eligible = first[first["universe_eligible"] == True].copy()
+                rejected = first[first["universe_eligible"] != True].copy()
+                return (
+                    eligible.reset_index(drop=True),
+                    rejected.reset_index(drop=True),
+                )
+
+            if "eligible" in first.columns:
+                eligible = first[first["eligible"] == True].copy()
+                rejected = first[first["eligible"] != True].copy()
+                return (
+                    eligible.reset_index(drop=True),
+                    rejected.reset_index(drop=True),
+                )
+
+            if len(first) != len(second):
+                full = first if len(first) > len(second) else second
+                eligible = second if len(first) > len(second) else first
+
+                key = None
+                for candidate in ("coin_id", "symbol"):
+                    if candidate in full.columns and candidate in eligible.columns:
+                        key = candidate
+                        break
+
+                if key is not None:
+                    eligible_keys = set(eligible[key].dropna().astype(str))
+                    rejected = full[
+                        ~full[key].astype(str).isin(eligible_keys)
                     ].copy()
-
-                    rejected = first[
-                        first["universe_eligible"] != True
-                    ].copy()
-
-                    return eligible, rejected
-
-                if (
-                    "eligible" in first.columns
-                ):
-
-                    eligible = first[
-                        first["eligible"] == True
-                    ].copy()
-
-                    rejected = first[
-                        first["eligible"] != True
-                    ].copy()
-
-                    return eligible, rejected
-
-                # If second is a strict subset of first, treat second as eligible
-                # and derive rejected rows by coin_id/symbol.
-                if len(second) < len(first):
-
-                    key = None
-
-                    for candidate in (
-                        "coin_id",
-                        "symbol",
-                    ):
-                        if (
-                            candidate in first.columns
-                            and candidate in second.columns
-                        ):
-                            key = candidate
-                            break
-
-                    if key is not None:
-
-                        eligible_keys = set(
-                            second[key]
-                            .dropna()
-                            .astype(str)
-                        )
-
-                        rejected = first[
-                            ~first[key]
-                            .astype(str)
-                            .isin(eligible_keys)
-                        ].copy()
-
-                        return second, rejected
+                    return (
+                        eligible.reset_index(drop=True),
+                        rejected.reset_index(drop=True),
+                    )
 
             return first, second
 
         if len(frames) == 1:
-
-            return (
-                frames[0].copy(),
-                pd.DataFrame(),
-            )
+            return frames[0].copy(), pd.DataFrame()
 
     raise RuntimeError(
         "Unsupported return type from universe_engine."
     )
+
 
 
 # ============================================================
