@@ -62,6 +62,10 @@ from data.tokenomics_data import (
     enrich_with_tokenomics_data,
 )
 
+from data.holder_value_data import (
+    enrich_with_holder_value_data,
+)
+
 from data.developer_data import (
     enrich_with_developer_data,
 )
@@ -707,6 +711,18 @@ def enrich_dataset(
 
     print(
         "[tokenomics_data] completed"
+    )
+
+    print(
+        "\n[holder_value_data] starting"
+    )
+
+    result = enrich_with_holder_value_data(
+        result
+    )
+
+    print(
+        "[holder_value_data] completed"
     )
 
     print(
