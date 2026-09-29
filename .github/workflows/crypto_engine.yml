@@ -68,6 +68,130 @@ jobs:
         run: |
           python reports/report_pdf.py
 
+      - name: Send report by email
+        if: success()
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import os
+          import smtplib
+          from pathlib import Path
+          from email.message import EmailMessage
+          from datetime import datetime, timezone
+
+          gmail_user = os.environ["GMAIL_USER"]
+          gmail_password = os.environ["GMAIL_APP_PASSWORD"]
+
+          recipient = "vilsonjosepereirapinto@gmail.com"
+
+          output_dir = Path("output")
+
+          pdf_file = output_dir / "crypto_opportunity_report.pdf"
+          summary_file = output_dir / "engine_summary.txt"
+          top_file = output_dir / "crypto_opportunities_top.csv"
+
+          if not pdf_file.exists():
+              raise FileNotFoundError(
+                  f"PDF não encontrado: {pdf_file}"
+              )
+
+          if summary_file.exists():
+              summary = summary_file.read_text(
+                  encoding="utf-8"
+              )
+          else:
+              summary = (
+                  "Crypto Opportunity Engine executado "
+                  "com sucesso."
+              )
+
+          generated_at = datetime.now(
+              timezone.utc
+          ).strftime("%d/%m/%Y %H:%M UTC")
+
+          message = EmailMessage()
+
+          message["From"] = gmail_user
+          message["To"] = recipient
+          message["Subject"] = (
+              "Crypto Opportunity Engine — "
+              "Relatório Diário"
+          )
+
+          body = f"""
+CRYPTO OPPORTUNITY ENGINE
+
+Execução concluída com sucesso.
+
+Data da execução:
+{generated_at}
+
+RESUMO DO MOTOR
+============================================================
+
+{summary}
+
+============================================================
+
+O relatório completo está anexado em PDF.
+
+Metodologia:
+O motor procura projetos cripto de qualidade em que a melhora
+econômica e fundamental esteja avançando mais rapidamente do
+que a precificação do mercado.
+
+O timing é analisado separadamente da qualidade da oportunidade.
+
+Arquivo principal:
+crypto_opportunity_report.pdf
+"""
+
+          message.set_content(body)
+
+          with pdf_file.open("rb") as file:
+              message.add_attachment(
+                  file.read(),
+                  maintype="application",
+                  subtype="pdf",
+                  filename=pdf_file.name,
+              )
+
+          if top_file.exists():
+              with top_file.open("rb") as file:
+                  message.add_attachment(
+                      file.read(),
+                      maintype="text",
+                      subtype="csv",
+                      filename=top_file.name,
+                  )
+
+          print(
+              "[email] Conectando ao Gmail SMTP..."
+          )
+
+          with smtplib.SMTP_SSL(
+              "smtp.gmail.com",
+              465,
+              timeout=30,
+          ) as smtp:
+
+              smtp.login(
+                  gmail_user,
+                  gmail_password,
+              )
+
+              smtp.send_message(
+                  message
+              )
+
+          print(
+              "[email] Relatório enviado com sucesso para "
+              + recipient
+          )
+          PY
+
       - name: Show output files
         if: always()
         run: |
