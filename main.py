@@ -702,9 +702,7 @@ def enrich_dataset(
     )
 
     result = enrich_with_tokenomics_data(
-        result,
-        fetch_history=False,
-        fetch_missing_details=False,
+        result
     )
 
     print(
