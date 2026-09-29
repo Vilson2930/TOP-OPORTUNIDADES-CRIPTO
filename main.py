@@ -528,10 +528,75 @@ def split_universe_result(
 
         if len(frames) >= 2:
 
-            return (
-                frames[0].copy(),
-                frames[1].copy(),
-            )
+            first = frames[0].copy()
+            second = frames[1].copy()
+
+            # universe_engine may return (full_dataset, eligible_dataset).
+            # Detect that shape and derive rejected rows from the full dataset.
+            if len(first) >= len(second):
+
+                if (
+                    "universe_eligible" in first.columns
+                ):
+
+                    eligible = first[
+                        first["universe_eligible"] == True
+                    ].copy()
+
+                    rejected = first[
+                        first["universe_eligible"] != True
+                    ].copy()
+
+                    return eligible, rejected
+
+                if (
+                    "eligible" in first.columns
+                ):
+
+                    eligible = first[
+                        first["eligible"] == True
+                    ].copy()
+
+                    rejected = first[
+                        first["eligible"] != True
+                    ].copy()
+
+                    return eligible, rejected
+
+                # If second is a strict subset of first, treat second as eligible
+                # and derive rejected rows by coin_id/symbol.
+                if len(second) < len(first):
+
+                    key = None
+
+                    for candidate in (
+                        "coin_id",
+                        "symbol",
+                    ):
+                        if (
+                            candidate in first.columns
+                            and candidate in second.columns
+                        ):
+                            key = candidate
+                            break
+
+                    if key is not None:
+
+                        eligible_keys = set(
+                            second[key]
+                            .dropna()
+                            .astype(str)
+                        )
+
+                        rejected = first[
+                            ~first[key]
+                            .astype(str)
+                            .isin(eligible_keys)
+                        ].copy()
+
+                        return second, rejected
+
+            return first, second
 
         if len(frames) == 1:
 
@@ -638,8 +703,7 @@ def enrich_dataset(
 
     result = enrich_with_tokenomics_data(
         result,
-        fetch_history=False,
-        fetch_missing_details=False,
+        fetch_history=True,
     )
 
     print(
