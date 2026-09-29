@@ -35,6 +35,43 @@ RETRY_BACKOFF_SECONDS = 3
 
 
 # ============================================================
+# COLUNAS CANÔNICAS
+# ============================================================
+
+MARKET_COLUMNS = [
+    "coin_id",
+    "symbol",
+    "name",
+    "price",
+    "market_cap",
+    "market_cap_rank",
+    "fdv",
+    "daily_volume",
+    "circulating_supply",
+    "total_supply",
+    "max_supply",
+    "market_cap_fdv_ratio",
+    "circulating_total_ratio",
+    "ath",
+    "ath_change_percentage",
+    "atl",
+    "price_change_24h",
+    "price_change_7d",
+    "price_change_30d",
+    "last_updated",
+]
+
+HISTORY_METRIC_COLUMNS = [
+    "return_30d",
+    "return_90d",
+    "return_180d",
+    "return_365d",
+    "drawdown_365d",
+    "volume_growth_30d",
+]
+
+
+# ============================================================
 # STABLECOINS
 # ============================================================
 
@@ -87,6 +124,42 @@ WRAPPED_SYMBOLS = {
 
 
 # ============================================================
+# DATAFRAME VAZIO PADRONIZADO
+# ============================================================
+
+def _empty_market_dataframe(
+    include_history: bool = False,
+) -> pd.DataFrame:
+
+    columns = list(
+        MARKET_COLUMNS
+    )
+
+    columns.extend(
+        [
+            "market_data_completeness",
+            "market_data_quality_pass",
+        ]
+    )
+
+    if include_history:
+
+        columns.extend(
+            HISTORY_METRIC_COLUMNS
+        )
+
+    columns = list(
+        dict.fromkeys(
+            columns
+        )
+    )
+
+    return pd.DataFrame(
+        columns=columns
+    )
+
+
+# ============================================================
 # HTTP
 # ============================================================
 
@@ -95,7 +168,10 @@ def _request(
     params: Optional[Dict] = None,
 ) -> Optional[object]:
 
-    url = f"{COINGECKO_BASE_URL}{endpoint}"
+    url = (
+        f"{COINGECKO_BASE_URL}"
+        f"{endpoint}"
+    )
 
     headers = {
         "accept": "application/json",
@@ -122,13 +198,15 @@ def _request(
             if response.status_code == 200:
 
                 try:
+
                     return response.json()
 
                 except ValueError:
 
                     print(
                         "[market_data] "
-                        "Resposta JSON inválida da CoinGecko."
+                        "Resposta JSON inválida "
+                        "da CoinGecko."
                     )
 
             elif response.status_code == 429:
@@ -240,7 +318,9 @@ def _request(
 # HELPERS
 # ============================================================
 
-def _safe_float(value) -> float:
+def _safe_float(
+    value,
+) -> float:
 
     try:
 
@@ -255,6 +335,7 @@ def _safe_float(value) -> float:
         TypeError,
         ValueError,
     ):
+
         return np.nan
 
 
@@ -272,6 +353,7 @@ def _safe_divide(
         )
         or denominator == 0
     ):
+
         return np.nan
 
     return (
@@ -432,7 +514,8 @@ def fetch_market_universe() -> pd.DataFrame:
 
         print(
             "[market_data] "
-            f"Coletando página {page}/{pages}..."
+            f"Coletando página "
+            f"{page}/{pages}..."
         )
 
         data = fetch_market_page(
@@ -473,7 +556,7 @@ def fetch_market_universe() -> pd.DataFrame:
             "CoinGecko não retornou ativos."
         )
 
-        return pd.DataFrame()
+        return _empty_market_dataframe()
 
     rows = []
 
@@ -707,10 +790,11 @@ def fetch_market_universe() -> pd.DataFrame:
             "filtros de mercado."
         )
 
-        return pd.DataFrame()
+        return _empty_market_dataframe()
 
     df = pd.DataFrame(
-        rows
+        rows,
+        columns=MARKET_COLUMNS,
     )
 
     df = df.drop_duplicates(
@@ -731,7 +815,7 @@ def fetch_market_universe() -> pd.DataFrame:
 
     print(
         "[market_data] "
-        f"Ativos coletados após filtros: "
+        "Ativos coletados após filtros: "
         f"{len(df)}"
     )
 
@@ -767,7 +851,15 @@ def fetch_price_history(
         data,
         dict,
     ):
-        return pd.DataFrame()
+
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "price",
+                "volume",
+                "historical_market_cap",
+            ]
+        )
 
     prices = data.get(
         "prices",
@@ -785,7 +877,15 @@ def fetch_price_history(
     )
 
     if not prices:
-        return pd.DataFrame()
+
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "price",
+                "volume",
+                "historical_market_cap",
+            ]
+        )
 
     price_df = pd.DataFrame(
         prices,
@@ -845,6 +945,12 @@ def fetch_price_history(
             how="left",
         )
 
+    else:
+
+        price_df[
+            "volume"
+        ] = np.nan
+
     if market_caps:
 
         cap_df = pd.DataFrame(
@@ -877,6 +983,12 @@ def fetch_price_history(
             on="date",
             how="left",
         )
+
+    else:
+
+        price_df[
+            "historical_market_cap"
+        ] = np.nan
 
     price_df = (
         price_df
@@ -925,6 +1037,7 @@ def calculate_return(
         )
         or current_price <= 0
     ):
+
         return np.nan
 
     target_date = (
@@ -958,6 +1071,7 @@ def calculate_return(
         )
         or old_price <= 0
     ):
+
         return np.nan
 
     return (
@@ -972,6 +1086,13 @@ def calculate_drawdown(
 ) -> float:
 
     if history.empty:
+        return np.nan
+
+    if (
+        "price"
+        not in history.columns
+    ):
+
         return np.nan
 
     prices = pd.to_numeric(
@@ -996,6 +1117,7 @@ def calculate_drawdown(
         )
         or peak <= 0
     ):
+
         return np.nan
 
     return (
@@ -1145,6 +1267,7 @@ def calculate_price_underreaction(
             price_change
         )
     ):
+
         return np.nan
 
     return (
@@ -1164,7 +1287,20 @@ def enrich_with_price_history(
 ) -> pd.DataFrame:
 
     if universe.empty:
-        return universe.copy()
+
+        result = universe.copy()
+
+        for column in HISTORY_METRIC_COLUMNS:
+
+            if column not in result.columns:
+
+                result[
+                    column
+                ] = pd.Series(
+                    dtype="float64"
+                )
+
+        return result
 
     df = universe.copy()
 
@@ -1225,7 +1361,18 @@ def enrich_with_price_history(
         )
 
     if not metrics_records:
-        return working
+
+        result = working.copy()
+
+        for column in HISTORY_METRIC_COLUMNS:
+
+            if column not in result.columns:
+
+                result[
+                    column
+                ] = np.nan
+
+        return result
 
     metrics_df = pd.DataFrame(
         metrics_records
@@ -1270,6 +1417,7 @@ def calculate_market_data_completeness(
                 value
             )
         ):
+
             available += 1
 
     return (
@@ -1285,7 +1433,32 @@ def apply_data_quality(
 ) -> pd.DataFrame:
 
     if df.empty:
-        return df.copy()
+
+        result = df.copy()
+
+        if (
+            "market_data_completeness"
+            not in result.columns
+        ):
+
+            result[
+                "market_data_completeness"
+            ] = pd.Series(
+                dtype="float64"
+            )
+
+        if (
+            "market_data_quality_pass"
+            not in result.columns
+        ):
+
+            result[
+                "market_data_quality_pass"
+            ] = pd.Series(
+                dtype="bool"
+            )
+
+        return result
 
     result = df.copy()
 
@@ -1333,7 +1506,9 @@ def build_market_dataset(
             "Universo vazio."
         )
 
-        return universe
+        return _empty_market_dataframe(
+            include_history=include_history
+        )
 
     universe = apply_data_quality(
         universe
@@ -1353,7 +1528,9 @@ def build_market_dataset(
             "controle de qualidade."
         )
 
-        return universe
+        return _empty_market_dataframe(
+            include_history=include_history
+        )
 
     if include_history:
 
@@ -1392,6 +1569,16 @@ if __name__ == "__main__":
 
         print(
             "Nenhum ativo encontrado."
+        )
+
+        print(
+            "Colunas preservadas:"
+        )
+
+        print(
+            list(
+                dataset.columns
+            )
         )
 
     else:
