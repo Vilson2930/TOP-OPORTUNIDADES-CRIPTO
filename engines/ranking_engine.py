@@ -702,6 +702,78 @@ def calculate_opportunity_score(
 
 
 # ============================================================
+# SCORE COMPLETENESS
+# ============================================================
+
+def calculate_opportunity_data_completeness(
+    row: pd.Series,
+) -> float:
+
+    scores = (
+        extract_component_scores(
+            row
+        )
+    )
+
+    total_weight = sum(
+        config.OPPORTUNITY_WEIGHTS.values()
+    )
+
+    available_weight = 0.0
+
+    for component, weight in (
+        config.OPPORTUNITY_WEIGHTS.items()
+    ):
+
+        value = scores.get(
+            component,
+            np.nan,
+        )
+
+        if not pd.isna(value):
+            available_weight += weight
+
+    if total_weight <= 0:
+        return 0.0
+
+    return round(
+        available_weight
+        / total_weight,
+        4,
+    )
+
+
+# ============================================================
+# OPPORTUNITY EVIDENCE POLICY
+# ============================================================
+
+# Opportunity is the engine's central objective. Missing data is NOT converted
+# to zero because absence of coverage is not evidence of poor economics.
+# However, a high score calculated from only a small fraction of the canonical
+# model must not be treated as a fully qualified opportunity.
+#
+# 65% preserves discovery capacity while requiring that most of the weighted
+# opportunity model is actually observed before the Opportunity Gate can pass.
+MIN_OPPORTUNITY_DATA_COMPLETENESS = 0.65
+
+
+def opportunity_evidence_gate(
+    row: pd.Series,
+) -> bool:
+
+    completeness = (
+        calculate_opportunity_data_completeness(
+            row
+        )
+    )
+
+    return (
+        completeness
+        >= MIN_OPPORTUNITY_DATA_COMPLETENESS
+    )
+
+
+# ============================================================
 # QUALITY GATES
 # ============================================================
 
@@ -754,6 +826,9 @@ def evaluate_quality_gates(
                 )
                 and opportunity_score
                 >= config.MIN_OPPORTUNITY_SCORE
+                and opportunity_evidence_gate(
+                    row
+                )
             ),
 
         "fundamental_gate":
@@ -912,6 +987,8 @@ def hard_block_reasons(
 
 def quality_failure_reasons(
     gates: Dict[str, bool],
+    row: pd.Series = None,
+    opportunity_score: float = np.nan,
 ) -> List[str]:
 
     mapping = {
@@ -936,6 +1013,19 @@ def quality_failure_reasons(
     for gate, passed in gates.items():
 
         if not passed:
+
+            if (
+                gate == "opportunity_gate"
+                and row is not None
+                and not pd.isna(opportunity_score)
+                and opportunity_score
+                >= config.MIN_OPPORTUNITY_SCORE
+                and not opportunity_evidence_gate(row)
+            ):
+                reasons.append(
+                    "INSUFFICIENT_OPPORTUNITY_EVIDENCE"
+                )
+                continue
 
             reasons.append(
                 mapping.get(
@@ -1055,48 +1145,6 @@ def classify_opportunity(
         return "WEAK"
 
     return "VERY_WEAK"
-
-
-# ============================================================
-# SCORE COMPLETENESS
-# ============================================================
-
-def calculate_opportunity_data_completeness(
-    row: pd.Series,
-) -> float:
-
-    scores = (
-        extract_component_scores(
-            row
-        )
-    )
-
-    total_weight = sum(
-        config.OPPORTUNITY_WEIGHTS.values()
-    )
-
-    available_weight = 0.0
-
-    for component, weight in (
-        config.OPPORTUNITY_WEIGHTS.items()
-    ):
-
-        value = scores.get(
-            component,
-            np.nan,
-        )
-
-        if not pd.isna(value):
-            available_weight += weight
-
-    if total_weight <= 0:
-        return 0.0
-
-    return round(
-        available_weight
-        / total_weight,
-        4,
-    )
 
 
 # ============================================================
@@ -1232,7 +1280,9 @@ def evaluate_ranking(
 
     failed_gates = (
         quality_failure_reasons(
-            gates
+            gates,
+            row=row,
+            opportunity_score=opportunity_score,
         )
     )
 
@@ -1260,6 +1310,11 @@ def evaluate_ranking(
             gates[
                 "opportunity_gate"
             ],
+
+        "opportunity_evidence_gate":
+            opportunity_evidence_gate(
+                row
+            ),
 
         "fundamental_gate":
             gates[
