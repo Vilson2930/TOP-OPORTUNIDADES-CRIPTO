@@ -31,7 +31,7 @@ import config
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
 
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 4
+MAX_RETRIES = 1
 RETRY_BACKOFF_SECONDS = 3
 
 
@@ -71,18 +71,13 @@ def _request(
 
             if response.status_code == 429:
 
-                wait = (
-                    RETRY_BACKOFF_SECONDS
-                    * attempt
-                )
-
                 print(
                     "[developer_data] "
-                    f"Rate limit. Aguardando {wait}s."
+                    "Rate limit. Fail-fast ativado; "
+                    "sem retries demorados."
                 )
 
-                time.sleep(wait)
-                continue
+                return None
 
             if 500 <= response.status_code < 600:
 
@@ -553,7 +548,7 @@ def calculate_development_confirmation(
 
 def enrich_with_developer_data(
     market_df: pd.DataFrame,
-    sleep_seconds: float = 1.2,
+    sleep_seconds: float = 0.0,
 ) -> pd.DataFrame:
 
     if market_df.empty:
@@ -611,9 +606,10 @@ def enrich_with_developer_data(
                 }
             )
 
-            time.sleep(
-                sleep_seconds
-            )
+            if sleep_seconds > 0:
+                time.sleep(
+                    sleep_seconds
+                )
 
             continue
 
@@ -676,9 +672,10 @@ def enrich_with_developer_data(
             }
         )
 
-        time.sleep(
-            sleep_seconds
-        )
+        if sleep_seconds > 0:
+            time.sleep(
+                sleep_seconds
+            )
 
     developer_df = pd.DataFrame(
         records
