@@ -43,9 +43,10 @@ def _safe_float(value) -> float:
         if value is None:
             return np.nan
 
-        return float(value)
+        number = float(value)
+        return number if np.isfinite(number) else np.nan
 
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return np.nan
 
 
@@ -169,7 +170,7 @@ def calculate_market_cap_revenue(
         ],
     )
 
-    if not pd.isna(explicit):
+    if not pd.isna(explicit) and explicit > 0:
         return explicit
 
     market_cap = _safe_float(
@@ -201,7 +202,7 @@ def calculate_fdv_revenue(
         ],
     )
 
-    if not pd.isna(explicit):
+    if not pd.isna(explicit) and explicit > 0:
         return explicit
 
     fdv = _safe_float(
@@ -233,7 +234,7 @@ def calculate_market_cap_fees(
         ],
     )
 
-    if not pd.isna(explicit):
+    if not pd.isna(explicit) and explicit > 0:
         return explicit
 
     market_cap = _safe_float(
@@ -265,7 +266,7 @@ def calculate_market_cap_tvl(
         ],
     )
 
-    if not pd.isna(explicit):
+    if not pd.isna(explicit) and explicit > 0:
         return explicit
 
     market_cap = _safe_float(
@@ -430,6 +431,7 @@ def calculate_historical_valuation_score(
 
     if (
         pd.isna(current_multiple)
+        or current_multiple <= 0
         or pd.isna(historical_median)
         or historical_median <= 0
     ):
@@ -505,6 +507,7 @@ def calculate_peer_relative_score(
 
     if (
         pd.isna(current_multiple)
+        or current_multiple <= 0
         or pd.isna(peer_median)
         or peer_median <= 0
     ):
@@ -572,16 +575,18 @@ def add_peer_valuation_metrics(
             )
         )
 
-    category_medians = (
-        result.groupby(
-            "category"
-        )["market_cap_revenue"]
-        .transform("median")
-    )
-
-    result[
-        "category_market_cap_revenue_median"
-    ] = category_medians
+    # Comparação leave-one-out: o próprio token não integra sua mediana.
+    # Exigimos pelo menos cinco OUTROS tokens comparáveis.
+    result["peer_valuation_sample_size"] = 0
+    result["category_market_cap_revenue_median"] = np.nan
+    for category, group in result.groupby("category"):
+        valid = pd.to_numeric(group["market_cap_revenue"], errors="coerce")
+        valid = valid.where(np.isfinite(valid) & (valid > 0)).dropna()
+        for idx in group.index:
+            others = valid.drop(index=idx, errors="ignore")
+            result.at[idx, "peer_valuation_sample_size"] = len(others)
+            if len(others) >= 5:
+                result.at[idx, "category_market_cap_revenue_median"] = float(others.median())
 
     return result
 
@@ -923,6 +928,21 @@ def evaluate_valuation(
             calculate_valuation_data_completeness(
                 row
             ),
+        "valuation_evidence_count": sum(
+            not pd.isna(value) for value in (
+                market_cap_revenue, fdv_revenue, market_cap_fees,
+                market_cap_tvl, historical_score, peer_score,
+            )
+        ),
+        "valuation_evidence_status": (
+            "MISSING" if all(pd.isna(value) for value in (
+                market_cap_revenue, fdv_revenue, market_cap_fees,
+                market_cap_tvl, historical_score, peer_score,
+            )) else "COMPLETE" if all(not pd.isna(value) for value in (
+                market_cap_revenue, fdv_revenue, market_cap_fees,
+                market_cap_tvl, historical_score, peer_score,
+            )) else "PARTIAL"
+        ),
     }
 
 
