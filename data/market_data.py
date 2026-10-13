@@ -1210,6 +1210,84 @@ def _coingecko_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
     return df[["date", "price", "volume", "historical_market_cap"]].reset_index(drop=True)
 
 
+# ============================================================
+# KRAKEN OHLC - FALLBACK HISTORICO COM MAPEAMENTO EXPLICITO
+# ============================================================
+
+# Apenas pares identificados manualmente. NUNCA associar ativos por
+# simbolo generico ou utilizar o ID CoinGecko como ID Kraken.
+KRAKEN_USD_PAIRS = {
+    "ethereum": ("ETH", "ETHUSD"),
+    "ripple": ("XRP", "XRPUSD"),
+    "solana": ("SOL", "SOLUSD"),
+    "tron": ("TRX", "TRXUSD"),
+    "zcash": ("ZEC", "ZECUSD"),
+    "chainlink": ("LINK", "LINKUSD"),
+    "avalanche-2": ("AVAX", "AVAXUSD"),
+    "polkadot": ("DOT", "DOTUSD"),
+    "dogecoin": ("DOGE", "DOGEUSD"),
+    "litecoin": ("LTC", "LTCUSD"),
+    "cardano": ("ADA", "ADAUSD"),
+    "uniswap": ("UNI", "UNIUSD"),
+    "aave": ("AAVE", "AAVEUSD"),
+}
+
+
+def _kraken_daily_chart(coin_id: str, symbol: str) -> pd.DataFrame:
+    """OHLC diario publico; sem chaves. Limite da API: ~720 candles."""
+    empty = pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    pair = KRAKEN_USD_PAIRS.get(str(coin_id).lower())
+    if pair is None or str(symbol).upper().strip() != pair[0]:
+        return empty
+    data = _http_get(
+        "https://api.kraken.com/0/public/OHLC",
+        params={"pair": pair[1], "interval": 1440},
+        provider=f"Kraken history {coin_id}",
+    )
+    if not isinstance(data, dict) or data.get("error"):
+        print(f"[market_data] Kraken {coin_id}: erro API {str(data.get('error') if isinstance(data, dict) else 'sem resposta')[:120]}")
+        return empty
+    payload = data.get("result")
+    if not isinstance(payload, dict):
+        return empty
+    keys = [key for key in payload if key != "last"]
+    if len(keys) != 1 or not isinstance(payload[keys[0]], list):
+        return empty
+    rows = payload[keys[0]]
+    if len(rows) < 2:
+        return empty
+    try:
+        df = pd.DataFrame(rows)
+        if df.shape[1] < 7:
+            return empty
+        # Kraken OHLC: time, open, high, low, close, vwap, volume, count
+        df = pd.DataFrame({
+            "date": pd.to_datetime(pd.to_numeric(df.iloc[:, 0], errors="coerce"), unit="s", utc=True, errors="coerce"),
+            "price": pd.to_numeric(df.iloc[:, 4], errors="coerce"),
+            "volume": pd.to_numeric(df.iloc[:, 6], errors="coerce"),
+        })
+        df = df.dropna(subset=["date", "price"])
+        df = df[df["price"] > 0].sort_values("date").drop_duplicates("date")
+        # Excluir candle diario ainda em formacao (ultimo candle Kraken).
+        if len(df) > 1:
+            df = df.iloc[:-1].copy()
+        df["historical_market_cap"] = np.nan
+        return df.reset_index(drop=True)
+    except (ValueError, TypeError, IndexError, KeyError) as exc:
+        print(f"[market_data] Kraken {coin_id}: OHLC invalido: {exc}")
+        return empty
+
+
+def _historical_chart_with_fallback(coin_id: str, symbol: str, days: int) -> tuple:
+    """Prioriza Kraken apenas para pares mapeados; fallback CoinGecko."""
+    if str(coin_id).lower() in KRAKEN_USD_PAIRS:
+        chart = _kraken_daily_chart(coin_id, symbol)
+        if not chart.empty:
+            return chart, "KRAKEN"
+    chart = _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
+    return chart, "COINGECKO" if not chart.empty else "UNAVAILABLE"
+
+
 def enrich_with_price_history(
     universe: pd.DataFrame,
     top_n: Optional[int] = None,
@@ -1233,6 +1311,7 @@ def enrich_with_price_history(
 
     eligible = result.index if top_n is None else result.index[:max(0, int(top_n))]
     budget = _history_budget()
+    result["history_source"] = "NOT_REQUESTED"
     requests_made = 0
     print(f"[market_data] Histórico real: orçamento máximo {budget} requisições; elegíveis {len(eligible)}.")
     for idx in eligible:
@@ -1245,7 +1324,10 @@ def enrich_with_price_history(
         if not coin_id:
             continue
         requests_made += 1
-        history = _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
+        history, history_provider = _historical_chart_with_fallback(
+            coin_id, str(row.get("symbol", "")), days
+        )
+        result.at[idx, "history_source"] = history_provider
         if history.empty:
             print(f"[market_data] Histórico {coin_id}: sem dados; verifique HTTP/API no log.")
             continue
@@ -1254,9 +1336,9 @@ def enrich_with_price_history(
             value = metrics.get(key, np.nan)
             if pd.notna(value):
                 result.at[idx, key] = value
-        print(f"[market_data] Histórico {coin_id}: {len(history)} observações; retornos 90d={metrics.get('return_90d')}, 180d={metrics.get('return_180d')}, 365d={metrics.get('return_365d')}.")
+        print(f"[market_data] Histórico {coin_id} ({history_provider}): {len(history)} observações; retornos 90d={metrics.get('return_90d')}, 180d={metrics.get('return_180d')}, 365d={metrics.get('return_365d')}.")
         time.sleep(1.5)
-    print(f"[market_data] Histórico: {requests_made} consultas; {len(result)} ativos preservados.")
+    print(f"[market_data] Histórico: {requests_made} ativos consultados; {len(result)} ativos preservados.")
     return result
 
 
