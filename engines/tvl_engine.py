@@ -675,40 +675,33 @@ def calculate_raw_tvl_score(
 # CATEGORY-ADJUSTED TVL SCORE
 # ============================================================
 
+def calculate_tvl_score_observed(
+    row: pd.Series,
+) -> float:
+    """Original category-adjusted TVL score, conditional on observed inputs."""
+    raw_score = calculate_raw_tvl_score(row)
+    if pd.isna(raw_score):
+        return np.nan
+    relevance = get_tvl_category_relevance(row)
+    adjusted = raw_score * relevance + 50.0 * (1 - relevance)
+    return round(_clip_score(adjusted), 2)
+
+
 def calculate_tvl_score(
     row: pd.Series,
 ) -> float:
+    """Evidence-adjusted TVL score used downstream by the ranking engine.
 
-    raw_score = (
-        calculate_raw_tvl_score(
-            row
-        )
-    )
-
-    if pd.isna(raw_score):
+    A missing metric is not evidence of poor performance. The original
+    conditional score is retained separately as tvl_score_observed; coverage
+    scales only the operational score to prevent a single metric from
+    receiving the same weight as a fully evidenced TVL assessment.
+    """
+    observed = calculate_tvl_score_observed(row)
+    if pd.isna(observed):
         return np.nan
-
-    relevance = (
-        get_tvl_category_relevance(
-            row
-        )
-    )
-
-    neutral_score = 50.0
-
-    adjusted = (
-        raw_score
-        * relevance
-        + neutral_score
-        * (1 - relevance)
-    )
-
-    return round(
-        _clip_score(
-            adjusted
-        ),
-        2,
-    )
+    coverage = calculate_tvl_data_completeness(row)
+    return round(_clip_score(observed * coverage), 2)
 
 
 # ============================================================
@@ -977,6 +970,12 @@ def evaluate_tvl(
         "tvl_score":
             adjusted_score,
 
+        "tvl_score_observed":
+            calculate_tvl_score_observed(row),
+
+        "tvl_evidence_coverage":
+            calculate_tvl_data_completeness(row),
+
         "tvl_price_divergence":
             divergence,
 
@@ -1097,6 +1096,8 @@ if __name__ == "__main__":
         "tvl_category_relevance",
         "tvl_raw_score",
         "tvl_score",
+        "tvl_score_observed",
+        "tvl_evidence_coverage",
         "tvl_price_divergence",
         "tvl_status",
         "tvl_data_completeness",
