@@ -1245,15 +1245,16 @@ def enrich_with_price_history(
         if not coin_id:
             continue
         requests_made += 1
-        history = _coingecko_chart(coin_id, days=max(366, int(days)))
+        history = _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
         if history.empty:
+            print(f"[market_data] Histórico {coin_id}: sem dados; verifique HTTP/API no log.")
             continue
         metrics = calculate_price_metrics(history)
         for key in HISTORY_METRIC_COLUMNS:
             value = metrics.get(key, np.nan)
             if pd.notna(value):
                 result.at[idx, key] = value
-        print(f"[market_data] Histórico {coin_id}: {len(history)} observações.")
+        print(f"[market_data] Histórico {coin_id}: {len(history)} observações; retornos 90d={metrics.get('return_90d')}, 180d={metrics.get('return_180d')}, 365d={metrics.get('return_365d')}.")
         time.sleep(1.5)
     print(f"[market_data] Histórico: {requests_made} consultas; {len(result)} ativos preservados.")
     return result
@@ -1271,7 +1272,7 @@ def fetch_price_history(
     """Histórico real CoinGecko; nunca mistura identificadores CoinPaprika."""
     if preferred_source and str(preferred_source).upper() != "COINGECKO":
         return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
-    return _coingecko_chart(coin_id, days=max(366, int(days)))
+    return _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
 
 
 def calculate_return(
