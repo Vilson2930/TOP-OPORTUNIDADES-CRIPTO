@@ -1223,6 +1223,68 @@ def evaluate_dilution(
             calculate_dilution_data_completeness(
                 row
             ),
+
+        # Campos de auditoria: nao alteram o score ou os gates.
+        # Distingue pontuacao observada de evidencia insuficiente.
+        "dilution_available_components":
+            sum(
+                not pd.isna(value)
+                for value in (
+                    circulating_ratio,
+                    market_cap_fdv_ratio,
+                    annual_inflation,
+                    unlock_90d,
+                    unlock_365d,
+                    insider_concentration,
+                    unlock_vs_liquidity,
+                )
+            ),
+
+        "dilution_missing_components":
+            "|".join(
+                name
+                for name, value in (
+                    ("circulating_supply_ratio", circulating_ratio),
+                    ("market_cap_fdv_ratio", market_cap_fdv_ratio),
+                    ("annual_inflation", annual_inflation),
+                    ("unlock_90d", unlock_90d),
+                    ("unlock_365d", unlock_365d),
+                    ("insider_concentration", insider_concentration),
+                    ("unlock_vs_liquidity", unlock_vs_liquidity),
+                )
+                if pd.isna(value)
+            ),
+
+        "dilution_evidence_status":
+            (
+                "COMPLETE"
+                if all(
+                    not pd.isna(value)
+                    for value in (
+                        circulating_ratio,
+                        market_cap_fdv_ratio,
+                        annual_inflation,
+                        unlock_90d,
+                        unlock_365d,
+                        insider_concentration,
+                        unlock_vs_liquidity,
+                    )
+                )
+                else "PARTIAL"
+                if any(
+                    not pd.isna(value)
+                    for value in (
+                        circulating_ratio,
+                        market_cap_fdv_ratio,
+                        annual_inflation,
+                        unlock_90d,
+                        unlock_365d,
+                        insider_concentration,
+                        unlock_vs_liquidity,
+                    )
+                )
+                else "MISSING"
+            ),
     }
 
 
