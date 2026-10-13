@@ -669,6 +669,12 @@ def calculate_opportunity_score(
     if pd.isna(base_score):
         return np.nan
 
+    # A pontuação observada não pode ser apresentada como se toda a
+    # matriz de evidências estivesse disponível. Preservamos a nota
+    # original em opportunity_score_observed e aplicamos cobertura ao
+    # score usado no ranking e nas decisões.
+    completeness = calculate_opportunity_data_completeness(row)
+
     divergence_score = (
         calculate_fundamental_price_divergence_score(
             row
@@ -679,10 +685,7 @@ def calculate_opportunity_score(
         not config.DIVERGENCE_ENABLED
         or pd.isna(divergence_score)
     ):
-        return round(
-            base_score,
-            2,
-        )
+        return round(_clip_score(base_score * completeness), 2)
 
     # Divergência é sinal central de assimetria,
     # mas não substitui a qualidade estrutural.
@@ -694,11 +697,20 @@ def calculate_opportunity_score(
     )
 
     return round(
-        _clip_score(
-            final_score
-        ),
+        _clip_score(final_score * completeness),
         2,
     )
+
+
+def calculate_opportunity_score_observed(row: pd.Series) -> float:
+    """Nota bruta condicionada aos componentes disponíveis; não é sinal de compra."""
+    base_score = calculate_base_opportunity_score(row)
+    if pd.isna(base_score):
+        return np.nan
+    divergence_score = calculate_fundamental_price_divergence_score(row)
+    if not config.DIVERGENCE_ENABLED or pd.isna(divergence_score):
+        return round(base_score, 2)
+    return round(_clip_score(base_score * 0.85 + divergence_score * 0.15), 2)
 
 
 # ============================================================
@@ -1300,6 +1312,12 @@ def evaluate_ranking(
 
         "opportunity_score":
             opportunity_score,
+
+        "opportunity_score_observed":
+            calculate_opportunity_score_observed(row),
+
+        "opportunity_evidence_coverage":
+            calculate_opportunity_data_completeness(row),
 
         "opportunity_status":
             classify_opportunity(
