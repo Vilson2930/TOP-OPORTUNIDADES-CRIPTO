@@ -1158,61 +1158,56 @@ def fetch_market_universe() -> pd.DataFrame:
 # HISTÓRICO OTIMIZADO
 # ============================================================
 
-def calculate_snapshot_history_metrics(
-    row: pd.Series,
-) -> Dict[str, float]:
-
-    """
-    Constrói as métricas históricas disponíveis diretamente
-    no snapshot de mercado.
-
-    Isso elimina centenas de chamadas individuais à API.
-
-    Importante:
-    - return_30d vem diretamente da variação de 30 dias.
-    - métricas não fornecidas pela fonte ficam NaN.
-    - nenhum valor histórico é inventado.
-    """
-
-    return_30d = _percent_to_decimal(
-        row.get(
-            "price_change_30d"
-        )
-    )
-
-    ath_change = _safe_float(
-        row.get(
-            "ath_change_percentage"
-        )
-    )
-
-    if pd.isna(ath_change):
-        drawdown = np.nan
-    else:
-        drawdown = (
-            ath_change
-            / 100.0
-        )
-
+def calculate_snapshot_history_metrics(row: pd.Series) -> Dict[str, float]:
+    """Métricas comprováveis do snapshot; ATH não é drawdown de 365 dias."""
     return {
-        "return_30d":
-            return_30d,
-
-        "return_90d":
-            np.nan,
-
-        "return_180d":
-            np.nan,
-
-        "return_365d":
-            np.nan,
-
-        "drawdown_365d":
-            drawdown,
-
-        "volume_growth_30d":
-            np.nan,
+        "return_30d": _percent_to_decimal(row.get("price_change_30d")),
+        "return_90d": np.nan,
+        "return_180d": np.nan,
+        "return_365d": np.nan,
+        "drawdown_365d": np.nan,
+        "volume_growth_30d": np.nan,
     }
+
+
+def _history_budget() -> int:
+    """Limite explícito de requisições por execução para evitar rate limit."""
+    import os
+    try:
+        return max(0, min(30, int(os.getenv("CRYPTO_HISTORY_MAX_REQUESTS", "8"))))
+    except ValueError:
+        return 8
+
+
+def _coingecko_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
+    """Uma consulta por moeda, sem fabricar preços ou trocar IDs entre APIs."""
+    from urllib.parse import quote
+    url = f"{COINGECKO_BASE_URL}/coins/{quote(str(coin_id), safe='')}/market_chart"
+    data = _http_get(
+        url,
+        params={"vs_currency": config.BASE_CURRENCY.lower(), "days": days},
+        provider=f"CoinGecko history {coin_id}",
+    )
+    if not isinstance(data, dict):
+        return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    prices = data.get("prices")
+    if not isinstance(prices, list) or len(prices) < 2:
+        return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    df = pd.DataFrame(prices, columns=["timestamp", "price"])
+    df["date"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True, errors="coerce")
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df = df.dropna(subset=["date", "price"])
+    df = df[df["price"] > 0].sort_values("date").drop_duplicates("date")
+    volumes = data.get("total_volumes")
+    if isinstance(volumes, list) and volumes:
+        vol = pd.DataFrame(volumes, columns=["timestamp", "volume"])
+        vol["date"] = pd.to_datetime(vol["timestamp"], unit="ms", utc=True, errors="coerce")
+        vol["volume"] = pd.to_numeric(vol["volume"], errors="coerce")
+        df = df.merge(vol[["date", "volume"]], on="date", how="left")
+    else:
+        df["volume"] = np.nan
+    df["historical_market_cap"] = np.nan
+    return df[["date", "price", "volume", "historical_market_cap"]].reset_index(drop=True)
 
 
 def enrich_with_price_history(
@@ -1220,96 +1215,47 @@ def enrich_with_price_history(
     top_n: Optional[int] = None,
     days: int = 365,
 ) -> pd.DataFrame:
+    """Enriquece até N ativos, preservando TODAS as linhas do universo.
 
+    A fonte CoinPaprika usa IDs diferentes: não requisitamos histórico CoinGecko
+    com ID Paprika, pois isso produziria correspondências falsas.
     """
-    Mantém compatibilidade com a interface anterior.
-
-    Não realiza chamadas históricas individuais.
-
-    O parâmetro days permanece por compatibilidade com main.py.
-    """
-
-    del days
-
-    if universe.empty:
-
-        result = universe.copy()
-
-        for column in HISTORY_METRIC_COLUMNS:
-
-            if column not in result.columns:
-
-                result[
-                    column
-                ] = pd.Series(
-                    dtype="float64"
-                )
-
+    result = universe.copy()
+    for column in HISTORY_METRIC_COLUMNS:
+        if column not in result.columns:
+            result[column] = np.nan
+    if result.empty:
         return result
 
-    working = universe.copy()
+    for idx, row in result.iterrows():
+        for key, value in calculate_snapshot_history_metrics(row).items():
+            result.at[idx, key] = value
 
-    if top_n is not None:
-
-        working = (
-            working
-            .head(top_n)
-            .copy()
-        )
-
-    print(
-        "[market_data] "
-        "Modo histórico otimizado ativo."
-    )
-
-    print(
-        "[market_data] "
-        "Usando métricas disponíveis "
-        "no snapshot; sem consultas "
-        "históricas individuais."
-    )
-
-    metric_rows = []
-
-    for _, row in working.iterrows():
-
-        metrics = (
-            calculate_snapshot_history_metrics(
-                row
-            )
-        )
-
-        metrics[
-            "coin_id"
-        ] = row.get(
-            "coin_id"
-        )
-
-        metric_rows.append(
-            metrics
-        )
-
-    metrics_df = pd.DataFrame(
-        metric_rows
-    )
-
-    if metrics_df.empty:
-
-        result = working.copy()
-
-        for column in HISTORY_METRIC_COLUMNS:
-
-            if column not in result.columns:
-                result[column] = np.nan
-
-        return result
-
-    result = working.merge(
-        metrics_df,
-        on="coin_id",
-        how="left",
-    )
-
+    eligible = result.index if top_n is None else result.index[:max(0, int(top_n))]
+    budget = _history_budget()
+    requests_made = 0
+    print(f"[market_data] Histórico real: orçamento máximo {budget} requisições; elegíveis {len(eligible)}.")
+    for idx in eligible:
+        if requests_made >= budget:
+            break
+        row = result.loc[idx]
+        if str(row.get("market_source", "")).upper() != "COINGECKO":
+            continue
+        coin_id = str(row.get("coin_id", "")).strip()
+        if not coin_id:
+            continue
+        requests_made += 1
+        history = _coingecko_chart(coin_id, days=max(366, int(days)))
+        if history.empty:
+            continue
+        metrics = calculate_price_metrics(history)
+        for key in HISTORY_METRIC_COLUMNS:
+            value = metrics.get(key, np.nan)
+            if pd.notna(value):
+                result.at[idx, key] = value
+        print(f"[market_data] Histórico {coin_id}: {len(history)} observações.")
+        time.sleep(1.5)
+    print(f"[market_data] Histórico: {requests_made} consultas; {len(result)} ativos preservados.")
     return result
 
 
@@ -1322,26 +1268,10 @@ def fetch_price_history(
     days: int = 365,
     preferred_source: Optional[str] = None,
 ) -> pd.DataFrame:
-
-    """
-    Função mantida para compatibilidade com imports existentes.
-
-    O pipeline principal não usa mais chamadas históricas
-    individuais devido ao rate limit das APIs públicas.
-    """
-
-    del coin_id
-    del days
-    del preferred_source
-
-    return pd.DataFrame(
-        columns=[
-            "date",
-            "price",
-            "volume",
-            "historical_market_cap",
-        ]
-    )
+    """Histórico real CoinGecko; nunca mistura identificadores CoinPaprika."""
+    if preferred_source and str(preferred_source).upper() != "COINGECKO":
+        return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    return _coingecko_chart(coin_id, days=max(366, int(days)))
 
 
 def calculate_return(
@@ -1799,8 +1729,7 @@ def build_market_dataset(
 
         print(
             "[market_data] "
-            "Histórico: modo otimizado "
-            "sem requisições individuais."
+            "Histórico: consultas limitadas e sem valores inventados."
         )
 
     return universe
