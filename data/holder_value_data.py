@@ -432,15 +432,11 @@ def _calculate_fee_distribution_ratio(
     if pd.isna(ratio):
         return np.nan
 
-    # Holders revenue não deve superar fees economicamente.
-    # Pequenas diferenças de janela/fonte podem ocorrer; limitamos a 1.
-    return float(
-        np.clip(
-            ratio,
-            0.0,
-            1.0,
-        )
-    )
+    # Não mascarar divergências entre fontes ou períodos.
+    # Uma razão acima de 1 exige reconciliação, não truncamento.
+    if ratio < 0 or ratio > 1:
+        return np.nan
+    return float(ratio)
 
 
 def _calculate_holder_revenue_yield(
@@ -482,7 +478,7 @@ def _evaluate_asset(
         )
         if holders_match is not None
         and pd.notna(_safe_float(holders_match.get("annualized")))
-        else _first_available(row, ("holder_revenue", "holder_revenue_annualized"))
+        else _first_available(row, ("holder_revenue", "holder_revenue_annualized", "holders_revenue", "tokenholder_revenue", "token_holders_revenue", "annualized_holder_revenue"))
     )
 
     protocol_revenue = (
@@ -575,9 +571,21 @@ def _evaluate_asset(
         "holder_value_data_completeness_source": completeness,
         "holder_value_data_quality_source": quality,
         "holder_value_data_source": (
-            "DEFILLAMA_DIMENSIONS"
-            if available_metrics > 0
+            "DEFILLAMA_DIMENSIONS" if holders_match is not None
+            else "PREEXISTING_DATA" if pd.notna(holder_revenue)
             else "DATA_INSUFFICIENT"
+        ),
+        "holder_value_holders_match_status": (
+            "MATCH_EXACT_IDENTITY" if holders_match is not None
+            else "NO_VERIFIED_MATCH"
+        ),
+        "holder_value_revenue_match_status": (
+            "MATCH_EXACT_IDENTITY" if revenue_match is not None
+            else "NO_VERIFIED_MATCH"
+        ),
+        "holder_value_fees_match_status": (
+            "MATCH_EXACT_IDENTITY" if fees_match is not None
+            else "NO_VERIFIED_MATCH"
         ),
         # Campos qualitativos permanecem NaN até existir fonte verificável.
         "buyback_active": np.nan,
@@ -701,22 +709,35 @@ def enrich_with_holder_value_data(
         index=result.index,
     )
 
-    # Evita sufixos _x/_y e garante que esta camada seja a fonte canônica
-    # somente para os campos que ela realmente produz.
+    # Preserva informação prévia quando a fonte nova não apresenta evidência.
+    # Não confunde ausência de informação com ausência de atividade econômica.
+    preserved_columns = {
+        "holder_revenue", "holder_revenue_annualized", "holder_revenue_yield",
+        "fee_distribution_ratio", "holder_value_protocol_revenue",
+        "holder_value_protocol_fees", "holder_value_protocol_slug",
+        "holder_value_protocol_name", "buyback_active", "burn_active",
+        "token_required_for_usage", "gas_token", "economic_staking",
+        "staking_yield", "real_yield",
+    }
     for column in evaluation_df.columns:
-        if column in result.columns:
-            result = result.drop(
-                columns=[column],
-                errors="ignore",
-            )
-
         new_values = evaluation_df[column]
-        if column in ("buyback_active", "burn_active", "token_required_for_usage",
-                      "gas_token", "economic_staking", "staking_yield", "real_yield"):
-            old_values = dataset[column] if column in dataset.columns else pd.Series(np.nan, index=result.index)
-            result[column] = new_values.combine_first(old_values)
+        if column in preserved_columns and column in result.columns:
+            result[column] = new_values.combine_first(result[column])
         else:
             result[column] = new_values
+
+    # Se um dado foi preservado, a completude deve refletir o dado final.
+    observed = result[[
+        "holder_revenue", "fee_distribution_ratio", "holder_revenue_yield"
+    ]].notna().sum(axis=1)
+    result["holder_value_data_completeness_source"] = (observed / 3).round(4)
+    result["holder_value_data_quality_source"] = observed.map({
+        0: "DATA_INSUFFICIENT", 1: "PARTIAL", 2: "PARTIAL", 3: "HIGH"
+    })
+    if "holder_value_data_source" in result:
+        preserved = (result["holder_revenue"].notna() &
+                     result["holder_value_data_source"].eq("DATA_INSUFFICIENT"))
+        result.loc[preserved, "holder_value_data_source"] = "PREEXISTING_DATA"
 
     matched = int(
         result["holder_revenue"]
