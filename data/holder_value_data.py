@@ -499,6 +499,20 @@ def _evaluate_asset(
         else _extract_existing_protocol_fees(row)
     )
 
+    # Reject cross-protocol arithmetic when different datasets resolve to
+    # different protocols. Keep each raw observation for diagnostics.
+    verified_slugs = {
+        _normalize_text(match.get("protocol_slug") or match.get("protocol_name"))
+        for match in (holders_match, revenue_match, fees_match)
+        if match is not None
+    }
+    source_consistent = len(verified_slugs) <= 1
+    # Pre-existing fee/revenue observations have no verified shared lineage;
+    # they cannot serve as a denominator for new holders revenue.
+    fees_comparable = (
+        source_consistent and holders_match is not None
+        and fees_match is not None
+    )
     market_cap = _safe_float(
         row.get("market_cap")
     )
@@ -506,7 +520,7 @@ def _evaluate_asset(
     fee_distribution_ratio = (
         _calculate_fee_distribution_ratio(
             holder_revenue=holder_revenue,
-            protocol_fees=protocol_fees,
+            protocol_fees=protocol_fees if fees_comparable else np.nan,
         )
     )
 
@@ -575,6 +589,8 @@ def _evaluate_asset(
             else "PREEXISTING_DATA" if pd.notna(holder_revenue)
             else "DATA_INSUFFICIENT"
         ),
+        "holder_value_cross_source_consistent": source_consistent,
+        "holder_value_fee_ratio_verified": fees_comparable,
         "holder_value_holders_match_status": (
             "MATCH_EXACT_IDENTITY" if holders_match is not None
             else "NO_VERIFIED_MATCH"
