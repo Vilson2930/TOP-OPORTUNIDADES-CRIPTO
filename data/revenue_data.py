@@ -149,43 +149,50 @@ def _build_dimension_table(session: requests.Session, data_type: str) -> pd.Data
     payload = _request_overview(session, data_type)
     records = [_protocol_record(p, data_type) for p in _extract_protocols(payload)]
     table = pd.DataFrame(records)
-    return table[table["annualized"].notna()].copy() if not table.empty else table
-
-
-def _candidate_matches(row: pd.Series, table: pd.DataFrame) -> pd.DataFrame:
-    """Somente match inequívoco. Símbolos isolados podem ser reutilizados."""
     if table.empty:
-        return table
+        return pd.DataFrame(columns=["data_type", "protocol_name", "protocol_display_name",
+            "protocol_slug", "protocol_symbol", "name_key", "display_name_key",
+            "slug_key", "symbol_key", "annualized", "short_term_growth",
+            "annualization_basis"])
+    # Preserve protocols even when their monetary value is unavailable, for diagnostics.
+    return table.copy()
+
+
+def _match_with_reason(row: pd.Series, table: pd.DataFrame):
+    """Match by exact full identity; never infer identity from a ticker alone."""
+    if table.empty:
+        return None, "SOURCE_EMPTY"
     name = _normalize_text(row.get("name"))
     coin_id = _normalize_text(row.get("coin_id"))
-    symbol = _normalize_symbol(row.get("symbol"))
     keys = ("name_key", "display_name_key", "slug_key")
-    # Nome completo tem prioridade; ID CoinGecko e slug DefiLlama não são
-    # necessariamente iguais e nunca são tratados como equivalência garantida.
+    ambiguous = False
     for identity in (name, coin_id):
         if not identity:
             continue
         mask = pd.Series(False, index=table.index)
         for key in keys:
             mask |= table[key].eq(identity)
-        candidates = table.loc[mask]
-        if len(candidates) == 1:
-            return candidates
-        if len(candidates) > 1:
-            # Uma coincidência textual múltipla não pode ser resolvida por receita.
-            return table.iloc[0:0]
-    if symbol:
-        candidates = table.loc[table["symbol_key"].eq(symbol)]
-        if len(candidates) == 1:
-            # Sem correspondência nominal, um ticker não prova identidade.
-            # Preservar NaN é preferível a atribuir receita de outro projeto.
-            return table.iloc[0:0]
-    return table.iloc[0:0]
+        matches = table.loc[mask]
+        if len(matches) == 1:
+            return matches.iloc[0], "MATCH_EXACT_IDENTITY"
+        if len(matches) > 1:
+            ambiguous = True
+    if ambiguous:
+        return None, "AMBIGUOUS_IDENTITY"
+    symbol = _normalize_symbol(row.get("symbol"))
+    if symbol and table["symbol_key"].eq(symbol).any():
+        return None, "TICKER_ONLY_UNVERIFIED"
+    return None, "NO_IDENTITY_MATCH"
+
+
+def _candidate_matches(row: pd.Series, table: pd.DataFrame) -> pd.DataFrame:
+    match, _ = _match_with_reason(row, table)
+    return table.loc[[match.name]] if match is not None else table.iloc[0:0]
 
 
 def _best_match(row: pd.Series, table: pd.DataFrame) -> Optional[pd.Series]:
-    matches = _candidate_matches(row, table)
-    return matches.iloc[0] if len(matches) == 1 else None
+    match, _ = _match_with_reason(row, table)
+    return match
 
 
 def _existing_revenue(row: pd.Series) -> float:
@@ -200,14 +207,20 @@ def _existing_fees(row: pd.Series) -> float:
 
 def _evaluate_asset(row: pd.Series, revenue_table: pd.DataFrame,
                     fees_table: pd.DataFrame) -> Dict:
-    rev = _best_match(row, revenue_table)
-    fees = _best_match(row, fees_table)
+    rev, rev_reason = _match_with_reason(row, revenue_table)
+    fees, fees_reason = _match_with_reason(row, fees_table)
     revenue_value = _safe_float(rev.get("annualized")) if rev is not None else _existing_revenue(row)
     fees_value = _safe_float(fees.get("annualized")) if fees is not None else _existing_fees(row)
-    revenue_growth = _safe_float(rev.get("short_term_growth")) if rev is not None else np.nan
-    fees_growth = _safe_float(fees.get("short_term_growth")) if fees is not None else np.nan
+    revenue_growth = (_safe_float(rev.get("short_term_growth")) if rev is not None
+                      else _first_available(row, ("revenue_growth",)))
+    fees_growth = (_safe_float(fees.get("short_term_growth")) if fees is not None
+                   else _first_available(row, ("fees_growth",)))
     available = sum(pd.notna(v) for v in (revenue_value, fees_value, revenue_growth, fees_growth))
     return {
+        "revenue_match_status": rev_reason,
+        "fees_match_status": fees_reason,
+        "revenue_source_status": "API_UNAVAILABLE_OR_EMPTY" if revenue_table.empty else "API_RESPONDED",
+        "fees_source_status": "API_UNAVAILABLE_OR_EMPTY" if fees_table.empty else "API_RESPONDED",
         "annualized_revenue": revenue_value,
         "annualized_fees": fees_value,
         "revenue_growth": revenue_growth,
@@ -245,7 +258,9 @@ def enrich_with_revenue_data(dataset: pd.DataFrame) -> pd.DataFrame:
         result[column] = evaluation_df[column]
     for col in ("annualized_revenue", "annualized_fees", "revenue_growth", "fees_growth"):
         print(f"[revenue_data] {col}: {int(result[col].notna().sum())}/{len(result)} ativos.")
-    print("[revenue_data] Match ambíguo rejeitado; ausências preservadas.")
+    for col in ("revenue_match_status", "fees_match_status"):
+        print(f"[revenue_data] {col}: {result[col].value_counts(dropna=False).to_dict()}")
+    print("[revenue_data] Tickers isolados não validam identidade; ausências preservadas.")
     return result
 
 
