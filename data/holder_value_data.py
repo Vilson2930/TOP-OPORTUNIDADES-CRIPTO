@@ -310,6 +310,12 @@ def _protocol_record(
         "total_30d": total_30d,
         "total_1y": total_1y,
         "annualized": annualized,
+        "annualization_period": (
+            "1y" if pd.notna(total_1y) and total_1y >= 0 else
+            "30d" if pd.notna(total_30d) and total_30d >= 0 else
+            "7d" if pd.notna(total_7d) and total_7d >= 0 else
+            "24h" if pd.notna(total_24h) and total_24h >= 0 else None
+        ),
     }
 
 
@@ -512,6 +518,7 @@ def _evaluate_asset(
     fees_comparable = (
         source_consistent and holders_match is not None
         and fees_match is not None
+        and holders_match.get("annualization_period") == fees_match.get("annualization_period")
     )
     market_cap = _safe_float(
         row.get("market_cap")
@@ -590,7 +597,13 @@ def _evaluate_asset(
             else "DATA_INSUFFICIENT"
         ),
         "holder_value_cross_source_consistent": source_consistent,
-        "holder_value_fee_ratio_verified": fees_comparable,
+        "holder_value_fee_ratio_verified": bool(fees_comparable and pd.notna(fee_distribution_ratio)),
+        "holder_value_capture_ratio_verified": bool(
+            source_consistent and holders_match is not None
+            and revenue_match is not None
+            and holders_match.get("annualization_period") == revenue_match.get("annualization_period")
+            and pd.notna(holder_revenue) and pd.notna(protocol_revenue)
+        ),
         "holder_value_holders_match_status": (
             "MATCH_EXACT_IDENTITY" if holders_match is not None
             else "NO_VERIFIED_MATCH"
@@ -741,6 +754,13 @@ def enrich_with_holder_value_data(
             result[column] = new_values.combine_first(result[column])
         else:
             result[column] = new_values
+
+    # A proporção pode ser usada no score apenas se as duas séries
+    # têm identidade e janela comprovadamente compatíveis.
+    # Dados anteriores permanecem em suas colunas de origem para auditoria,
+    # mas a proporção não comprovada não é elegível para pontuação.
+    verified_ratio = result["holder_value_fee_ratio_verified"].fillna(False).astype(bool)
+    result.loc[~verified_ratio, "fee_distribution_ratio"] = np.nan
 
     # Se um dado foi preservado, a completude deve refletir o dado final.
     observed = result[[
