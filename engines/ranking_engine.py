@@ -863,11 +863,12 @@ def evaluate_quality_gates(
 
         "holder_value_gate":
             (
-                not pd.isna(
-                    holder_value_score
-                )
-                and holder_value_score
-                >= config.MIN_HOLDER_VALUE_SCORE
+                not pd.isna(holder_value_score)
+                and holder_value_score >= config.MIN_HOLDER_VALUE_SCORE
+                # The holder engine already verifies independent evidence
+                # families and their weighted coverage. Fail closed if the
+                # upstream result is absent, rather than bypassing it.
+                and _safe_bool(row.get("holder_value_quality_gate"), False)
             ),
 
         "dilution_gate":
@@ -1037,6 +1038,16 @@ def quality_failure_reasons(
                 reasons.append(
                     "INSUFFICIENT_OPPORTUNITY_EVIDENCE"
                 )
+                continue
+
+            if (
+                gate == "holder_value_gate"
+                and row is not None
+                and not pd.isna(_safe_float(row.get("holder_value_score")))
+                and _safe_float(row.get("holder_value_score")) >= config.MIN_HOLDER_VALUE_SCORE
+                and not _safe_bool(row.get("holder_value_quality_gate"), False)
+            ):
+                reasons.append("INSUFFICIENT_HOLDER_VALUE_EVIDENCE")
                 continue
 
             reasons.append(
