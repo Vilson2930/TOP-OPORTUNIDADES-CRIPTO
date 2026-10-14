@@ -51,9 +51,10 @@ def _safe_float(value) -> float:
         if value is None:
             return np.nan
 
-        return float(value)
+        result = float(value)
+        return result if np.isfinite(result) else np.nan
 
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return np.nan
 
 
@@ -183,8 +184,9 @@ def extract_protocol_revenue(
     return _first_available(
         row,
         [
-            "protocol_revenue",
+            "holder_value_protocol_revenue",
             "annualized_revenue",
+            "protocol_revenue",
             "revenue_annualized",
             "protocol_revenue_annualized",
             "revenue_365d",
@@ -216,61 +218,23 @@ def extract_holder_revenue(
 # FEE DISTRIBUTION
 # ============================================================
 
-def extract_fee_distribution_ratio(
-    row: pd.Series,
-) -> float:
-
-    explicit_ratio = _first_available(
-        row,
-        [
-            "fee_distribution_ratio",
-            "holder_fee_share",
-            "tokenholder_fee_share",
-            "revenue_share_to_holders",
-        ],
-    )
-
-    if not pd.isna(
-        explicit_ratio
-    ):
-
-        if explicit_ratio > 1:
-            explicit_ratio = (
-                explicit_ratio
-                / 100
-            )
-
-        if not np.isfinite(explicit_ratio) or not 0 <= explicit_ratio <= 1:
-            return np.nan
-        return float(explicit_ratio)
-
-    holder_revenue = (
-        extract_holder_revenue(
-            row
-        )
-    )
-
-    protocol_revenue = (
-        extract_protocol_revenue(
-            row
-        )
-    )
-
-    if (
-        pd.isna(holder_revenue)
-        or pd.isna(protocol_revenue)
-        or protocol_revenue <= 0
-    ):
+def extract_fee_distribution_ratio(row: pd.Series) -> float:
+    """Holders revenue / fees; no automatic percentage conversion or clipping."""
+    explicit = _first_available(row, (
+        "fee_distribution_ratio", "holder_fee_share",
+        "tokenholder_fee_share", "revenue_share_to_holders",
+    ))
+    if pd.notna(explicit):
+        return float(explicit) if np.isfinite(explicit) and 0 <= explicit <= 1 else np.nan
+    holders = extract_holder_revenue(row)
+    fees = _first_available(row, (
+        "holder_value_protocol_fees", "annualized_fees", "fees_annualized",
+        "protocol_fees_annualized", "fees_365d", "protocol_fees",
+    ))
+    if pd.isna(holders) or pd.isna(fees) or fees <= 0:
         return np.nan
-
-    return float(
-        np.clip(
-            holder_revenue
-            / protocol_revenue,
-            0,
-            1,
-        )
-    )
+    ratio = holders / fees
+    return float(ratio) if np.isfinite(ratio) and 0 <= ratio <= 1 else np.nan
 
 
 # ============================================================
@@ -964,14 +928,8 @@ def calculate_holder_capture_ratio(
     ):
         return np.nan
 
-    return float(
-        np.clip(
-            holder_revenue
-            / protocol_revenue,
-            0,
-            1,
-        )
-    )
+    ratio = holder_revenue / protocol_revenue
+    return float(ratio) if np.isfinite(ratio) and 0 <= ratio <= 1 else np.nan
 
 
 # ============================================================
@@ -1150,6 +1108,38 @@ def calculate_holder_data_completeness(
     return round(available / len(values), 4)
 
 
+def calculate_holder_evidence(row: pd.Series) -> Dict:
+    """Weighted evidence coverage, separate from the economic score.
+
+    Two values derived from the same holders revenue are not independent
+    evidence. A missing datum is not scored as zero.
+    """
+    scores = {
+        "real_yield": score_real_yield(calculate_real_yield(row)),
+        "fee_distribution": score_fee_distribution(extract_fee_distribution_ratio(row)),
+        "buyback": calculate_buyback_score(row),
+        "burn": calculate_burn_score(row),
+        "token_required_for_usage": calculate_token_usage_score(row),
+        "economic_staking": calculate_economic_staking_score(row),
+    }
+    weights = config.HOLDER_VALUE_WEIGHTS
+    total = sum(float(weights[k]) for k in scores)
+    observed = [k for k, v in scores.items() if pd.notna(v)]
+    coverage = sum(float(weights[k]) for k in observed) / total if total > 0 else 0.0
+    # holder revenue yield is a diagnostic, not an additional independent family
+    yield_available = pd.notna(extract_holder_revenue_yield(row))
+    # 50% of original configured weight AND two original evidence families.
+    # This is a confidence rule, not a modification of MIN_HOLDER_VALUE_SCORE.
+    sufficient = coverage >= 0.50 and len(observed) >= 2
+    return {
+        "holder_value_confidence": round(coverage, 4),
+        "holder_value_evidence_count": len(observed),
+        "holder_value_yield_evidence_available": bool(yield_available),
+        "holder_value_evidence_sufficient": bool(sufficient),
+        "holder_value_evidence_status": "SUFFICIENT" if sufficient else "INSUFFICIENT",
+    }
+
+
 # ============================================================
 # AVALIAÇÃO INDIVIDUAL
 # ============================================================
@@ -1225,7 +1215,10 @@ def evaluate_holder_value(
         )
     )
 
+    evidence = calculate_holder_evidence(row)
+
     return {
+        **evidence,
         "real_yield":
             real_yield,
 
@@ -1273,10 +1266,10 @@ def evaluate_holder_value(
                 holder_score
             ),
 
-        "holder_value_quality_gate":
-            holder_value_quality_gate(
-                holder_score
-            ),
+        "holder_value_quality_gate": (
+            holder_value_quality_gate(holder_score)
+            and evidence["holder_value_evidence_sufficient"]
+        ),
 
         "inflationary_yield_warning":
             inflationary_yield,
