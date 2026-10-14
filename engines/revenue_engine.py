@@ -44,9 +44,10 @@ def _safe_float(value) -> float:
         if value is None:
             return np.nan
 
-        return float(value)
+        result = float(value)
+        return result if np.isfinite(result) else np.nan
 
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return np.nan
 
 
@@ -599,33 +600,32 @@ def calculate_revenue_score(
 def calculate_revenue_price_divergence(
     row: pd.Series,
 ) -> float:
+    """Compara crescimento econômico e preço apenas no mesmo horizonte.
 
-    revenue_growth = (
-        extract_revenue_growth(
-            row
-        )
+    O revenue_data atual publica `revenue_growth` como aceleração
+    7 dias versus 23 dias anteriores. Não é crescimento de 90 dias;
+    portanto não pode ser subtraído do retorno de preço de 90 dias.
+
+    Na ausência de crescimento real de receita de 90 dias, o resultado
+    permanece NaN, preservando a honestidade dos dados.
+    """
+    revenue_growth_90d = _first_available(
+        row,
+        [
+            "revenue_growth_90d",
+            "protocol_revenue_growth_90d",
+        ],
     )
-
-    price_return = (
-        _first_available(
-            row,
-            [
-                "return_90d",
-                "price_change_90d",
-            ],
-        )
+    price_return_90d = _first_available(
+        row,
+        [
+            "return_90d",
+            "price_change_90d",
+        ],
     )
-
-    if (
-        pd.isna(revenue_growth)
-        or pd.isna(price_return)
-    ):
+    if pd.isna(revenue_growth_90d) or pd.isna(price_return_90d):
         return np.nan
-
-    return (
-        revenue_growth
-        - price_return
-    )
+    return float(revenue_growth_90d - price_return_90d)
 
 
 def calculate_revenue_divergence_score(
