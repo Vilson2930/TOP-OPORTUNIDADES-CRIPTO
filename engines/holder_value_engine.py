@@ -219,22 +219,14 @@ def extract_holder_revenue(
 # ============================================================
 
 def extract_fee_distribution_ratio(row: pd.Series) -> float:
-    """Holders revenue / fees; no automatic percentage conversion or clipping."""
-    explicit = _first_available(row, (
-        "fee_distribution_ratio", "holder_fee_share",
-        "tokenholder_fee_share", "revenue_share_to_holders",
-    ))
-    if pd.notna(explicit):
-        return float(explicit) if np.isfinite(explicit) and 0 <= explicit <= 1 else np.nan
-    holders = extract_holder_revenue(row)
-    fees = _first_available(row, (
-        "holder_value_protocol_fees", "annualized_fees", "fees_annualized",
-        "protocol_fees_annualized", "fees_365d", "protocol_fees",
-    ))
-    if pd.isna(holders) or pd.isna(fees) or fees <= 0:
+    """Return fee share only when holder and fee observations share lineage.
+
+    No fallback division between unrelated or unverified sources is allowed.
+    """
+    if _first_boolean(row, ("holder_value_fee_ratio_verified",)) is not True:
         return np.nan
-    ratio = holders / fees
-    return float(ratio) if np.isfinite(ratio) and 0 <= ratio <= 1 else np.nan
+    explicit = _first_available(row, ("fee_distribution_ratio",))
+    return float(explicit) if pd.notna(explicit) and 0 <= explicit <= 1 else np.nan
 
 
 # ============================================================
@@ -903,31 +895,14 @@ def calculate_holder_value_score(
 # VALUE CAPTURE RATIO
 # ============================================================
 
-def calculate_holder_capture_ratio(
-    row: pd.Series,
-) -> float:
-    # Holder revenue / protocol revenue, distinto de fee_distribution_ratio
-    # (holder revenue / protocol fees). Não confundir os denominadores.
-
-    holder_revenue = (
-        extract_holder_revenue(
-            row
-        )
-    )
-
-    protocol_revenue = (
-        extract_protocol_revenue(
-            row
-        )
-    )
-
-    if (
-        pd.isna(holder_revenue)
-        or pd.isna(protocol_revenue)
-        or protocol_revenue <= 0
-    ):
+def calculate_holder_capture_ratio(row: pd.Series) -> float:
+    """Diagnostic holder revenue / protocol revenue, only for comparable series."""
+    if _first_boolean(row, ("holder_value_capture_ratio_verified",)) is not True:
         return np.nan
-
+    holder_revenue = extract_holder_revenue(row)
+    protocol_revenue = extract_protocol_revenue(row)
+    if pd.isna(holder_revenue) or pd.isna(protocol_revenue) or protocol_revenue <= 0:
+        return np.nan
     ratio = holder_revenue / protocol_revenue
     return float(ratio) if np.isfinite(ratio) and 0 <= ratio <= 1 else np.nan
 
