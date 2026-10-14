@@ -353,87 +353,34 @@ def _candidate_matches(
     row: pd.Series,
     table: pd.DataFrame,
 ) -> pd.DataFrame:
-
+    """Aceita somente identidade textual única, nunca ticker isolado."""
     if table.empty:
         return table
 
-    symbol_key = _normalize_symbol(
-        row.get("symbol")
-    )
-
-    name_key = _normalize_text(
-        row.get("name")
-    )
-
-    coin_id_key = _normalize_text(
-        row.get("coin_id")
-    )
-
-    masks = []
-
-    # Coin/protocol name and slug are safer than symbol alone.
-    if coin_id_key:
-        masks.append(
-            (table["slug_key"] == coin_id_key)
-            | (table["name_key"] == coin_id_key)
-            | (table["display_name_key"] == coin_id_key)
-        )
-
-    if name_key:
-        masks.append(
-            (table["name_key"] == name_key)
-            | (table["display_name_key"] == name_key)
-            | (table["slug_key"] == name_key)
-        )
-
-    if masks:
-        combined = masks[0].copy()
-
-        for mask in masks[1:]:
-            combined = combined | mask
-
-        matched = table[combined].copy()
-
-        if not matched.empty:
-            return matched
-
-    # Symbol é fallback, porque símbolos podem ser ambíguos.
-    if symbol_key:
-        symbol_matches = table[
-            table["symbol_key"] == symbol_key
+    name_key = _normalize_text(row.get("name"))
+    coin_id_key = _normalize_text(row.get("coin_id"))
+    for identity in (name_key, coin_id_key):
+        if not identity:
+            continue
+        matches = table[
+            (table["name_key"] == identity)
+            | (table["display_name_key"] == identity)
+            | (table["slug_key"] == identity)
         ].copy()
-
-        if len(symbol_matches) == 1:
-            return symbol_matches
-
-    return pd.DataFrame(
-        columns=table.columns
-    )
+        if len(matches) == 1:
+            return matches
+        if len(matches) > 1:
+            # Ambiguidade não pode ser resolvida pela maior receita.
+            return table.iloc[0:0].copy()
+    return table.iloc[0:0].copy()
 
 
 def _best_match(
     row: pd.Series,
     table: pd.DataFrame,
 ) -> Optional[pd.Series]:
-
-    matches = _candidate_matches(
-        row=row,
-        table=table,
-    )
-
-    if matches.empty:
-        return None
-
-    # Se houver mais de um protocolo relacionado ao mesmo token,
-    # usar o maior valor econômico observável evita escolher um adapter
-    # secundário quando existe o protocolo principal.
-    matches = matches.sort_values(
-        "annualized",
-        ascending=False,
-        na_position="last",
-    )
-
-    return matches.iloc[0]
+    matches = _candidate_matches(row=row, table=table)
+    return matches.iloc[0] if len(matches) == 1 else None
 
 
 # ============================================================
@@ -534,7 +481,8 @@ def _evaluate_asset(
             holders_match.get("annualized")
         )
         if holders_match is not None
-        else np.nan
+        and pd.notna(_safe_float(holders_match.get("annualized")))
+        else _first_available(row, ("holder_revenue", "holder_revenue_annualized"))
     )
 
     protocol_revenue = (
@@ -542,6 +490,7 @@ def _evaluate_asset(
             revenue_match.get("annualized")
         )
         if revenue_match is not None
+        and pd.notna(_safe_float(revenue_match.get("annualized")))
         else _extract_existing_protocol_revenue(row)
     )
 
@@ -550,6 +499,7 @@ def _evaluate_asset(
             fees_match.get("annualized")
         )
         if fees_match is not None
+        and pd.notna(_safe_float(fees_match.get("annualized")))
         else _extract_existing_protocol_fees(row)
     )
 
@@ -760,7 +710,13 @@ def enrich_with_holder_value_data(
                 errors="ignore",
             )
 
-        result[column] = evaluation_df[column]
+        new_values = evaluation_df[column]
+        if column in ("buyback_active", "burn_active", "token_required_for_usage",
+                      "gas_token", "economic_staking", "staking_yield", "real_yield"):
+            old_values = dataset[column] if column in dataset.columns else pd.Series(np.nan, index=result.index)
+            result[column] = new_values.combine_first(old_values)
+        else:
+            result[column] = new_values
 
     matched = int(
         result["holder_revenue"]
