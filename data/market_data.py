@@ -1174,9 +1174,9 @@ def _history_budget() -> int:
     """Limite explícito de requisições por execução para evitar rate limit."""
     import os
     try:
-        return max(0, min(30, int(os.getenv("CRYPTO_HISTORY_MAX_REQUESTS", "8"))))
+        return max(0, min(100, int(os.getenv("CRYPTO_HISTORY_MAX_REQUESTS", "40"))))
     except ValueError:
-        return 8
+        return 40
 
 
 def _coingecko_chart(coin_id: str, days: int = 365) -> pd.DataFrame:
@@ -1278,14 +1278,164 @@ def _kraken_daily_chart(coin_id: str, symbol: str) -> pd.DataFrame:
         return empty
 
 
-def _historical_chart_with_fallback(coin_id: str, symbol: str, days: int) -> tuple:
-    """Prioriza Kraken apenas para pares mapeados; fallback CoinGecko."""
-    if str(coin_id).lower() in KRAKEN_USD_PAIRS:
-        chart = _kraken_daily_chart(coin_id, symbol)
+def _defillama_daily_chart(coin_id: str, days: int = 390) -> pd.DataFrame:
+    """DefiLlama Coins chart, identificador CoinGecko explícito.
+
+    Não procura por ticker: tickers iguais podem representar projetos diferentes.
+    A API deve confirmar a chave consultada no objeto coins.
+    """
+    from urllib.parse import quote
+    import time as _time
+
+    empty = pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    if not coin_id or not isinstance(coin_id, str):
+        return empty
+    key = f"coingecko:{coin_id}"
+    now = int(_time.time())
+    start = now - max(390, int(days) + 10) * 86400
+    url = "https://coins.llama.fi/chart/" + quote(key, safe=":")
+    data = _http_get(
+        url,
+        params={"start": start, "span": max(390, int(days) + 10), "period": "1d"},
+        provider=f"DefiLlama history {coin_id}",
+    )
+    if not isinstance(data, dict):
+        return empty
+    coins = data.get("coins")
+    if not isinstance(coins, dict) or key not in coins:
+        return empty
+    payload = coins[key]
+    if not isinstance(payload, dict) or not isinstance(payload.get("prices"), list):
+        return empty
+    rows = payload["prices"]
+    if len(rows) < 2:
+        return empty
+    try:
+        df = pd.DataFrame(rows)
+        if not {"timestamp", "price"}.issubset(df.columns):
+            return empty
+        df = pd.DataFrame({
+            "date": pd.to_datetime(pd.to_numeric(df["timestamp"], errors="coerce"), unit="s", utc=True, errors="coerce"),
+            "price": pd.to_numeric(df["price"], errors="coerce"),
+        })
+        df = df.dropna(subset=["date", "price"])
+        df = df[df["price"] > 0].sort_values("date").drop_duplicates("date")
+        if df.empty:
+            return empty
+        # Rejeitar série desatualizada (não confundir preço antigo com atual).
+        if (pd.Timestamp.now(tz="UTC") - df["date"].iloc[-1]).total_seconds() > 3 * 86400:
+            return empty
+        df["volume"] = np.nan
+        df["historical_market_cap"] = np.nan
+        return df.reset_index(drop=True)
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        print(f"[market_data] DefiLlama {coin_id}: série inválida: {exc}")
+        return empty
+
+
+def _coinpaprika_id_map() -> dict:
+    """Mapeia (símbolo, nome) para ID Paprika somente quando único e ativo.
+
+    Não vincula projetos por ticker isolado; falha fechada em ambiguidades.
+    """
+    from functools import lru_cache
+    return _coinpaprika_id_map_cached()
+
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def _coinpaprika_id_map_cached() -> dict:
+    data = _http_get(f"{COINPAPRIKA_BASE_URL}/coins", provider="CoinPaprika coin mapping")
+    if not isinstance(data, list):
+        return {}
+    matches = {}
+    ambiguous = set()
+    for item in data:
+        if not isinstance(item, dict) or item.get("is_active") is not True:
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        name = " ".join(str(item.get("name") or "").casefold().split())
+        paprika_id = str(item.get("id") or "").strip()
+        if not symbol or not name or not paprika_id:
+            continue
+        key = (symbol, name)
+        if key in matches and matches[key] != paprika_id:
+            ambiguous.add(key)
+        else:
+            matches[key] = paprika_id
+    for key in ambiguous:
+        matches.pop(key, None)
+    print(f"[market_data] CoinPaprika: {len(matches)} IDs únicos por nome+símbolo; {len(ambiguous)} ambiguidades descartadas.")
+    return matches
+
+
+def _coinpaprika_daily_chart(coin_id: str, symbol: str, name: str, days: int = 390,
+                            market_source: str = "COINGECKO") -> pd.DataFrame:
+    """Consulta endpoint histórico público; disponibilidade depende do plano/API.
+
+    Para universo CoinPaprika, o ID já é nativo; para CoinGecko, exige
+    correspondência exata e não ambígua de nome + símbolo.
+    """
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import quote
+    empty = pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
+    if market_source == "COINPAPRIKA":
+        paprika_id = str(coin_id).strip()
+    else:
+        key = (str(symbol).strip().upper(), " ".join(str(name).casefold().split()))
+        paprika_id = _coinpaprika_id_map().get(key)
+    if not paprika_id:
+        return empty
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=max(390, int(days) + 10))
+    data = _http_get(
+        f"{COINPAPRIKA_BASE_URL}/tickers/{quote(paprika_id, safe='')}/historical",
+        params={"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"), "interval": "24h"},
+        provider=f"CoinPaprika history {paprika_id}",
+    )
+    if not isinstance(data, list) or len(data) < 2:
+        return empty
+    try:
+        df = pd.DataFrame(data)
+        if not {"timestamp", "price"}.issubset(df.columns):
+            return empty
+        result = pd.DataFrame({
+            "date": pd.to_datetime(df["timestamp"], utc=True, errors="coerce"),
+            "price": pd.to_numeric(df["price"], errors="coerce"),
+            "volume": pd.to_numeric(df["volume_24h"], errors="coerce") if "volume_24h" in df else np.nan,
+            "historical_market_cap": pd.to_numeric(df["market_cap"], errors="coerce") if "market_cap" in df else np.nan,
+        })
+        result = result.dropna(subset=["date", "price"])
+        result = result[result["price"] > 0].sort_values("date").drop_duplicates("date")
+        if result.empty or (pd.Timestamp.now(tz="UTC") - result["date"].iloc[-1]).total_seconds() > 3 * 86400:
+            return empty
+        return result.reset_index(drop=True)
+    except (TypeError, ValueError, KeyError) as exc:
+        print(f"[market_data] CoinPaprika {paprika_id}: dados inválidos: {exc}")
+        return empty
+
+
+def _historical_chart_with_fallback(coin_id: str, symbol: str, days: int,
+                                    name: str = "", market_source: str = "COINGECKO") -> tuple:
+    """Fontes gratuitas em cascata, preservando identidade do ativo."""
+    if market_source == "COINGECKO":
+        chart = _defillama_daily_chart(coin_id, days=max(390, days))
         if not chart.empty:
-            return chart, "KRAKEN"
-    chart = _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
-    return chart, "COINGECKO" if not chart.empty else "UNAVAILABLE"
+            return chart, "DEFILLAMA"
+    chart = _coinpaprika_daily_chart(coin_id, symbol, name, days=max(390, days), market_source=market_source)
+    if not chart.empty:
+        return chart, "COINPAPRIKA"
+    if market_source == "COINGECKO":
+        if str(coin_id).lower() in KRAKEN_USD_PAIRS:
+            chart = _kraken_daily_chart(coin_id, symbol)
+            if not chart.empty:
+                return chart, "KRAKEN"
+        chart = _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
+        if not chart.empty:
+            return chart, "COINGECKO"
+    return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"]), "UNAVAILABLE"
 
 
 def enrich_with_price_history(
@@ -1295,8 +1445,8 @@ def enrich_with_price_history(
 ) -> pd.DataFrame:
     """Enriquece até N ativos, preservando TODAS as linhas do universo.
 
-    A fonte CoinPaprika usa IDs diferentes: não requisitamos histórico CoinGecko
-    com ID Paprika, pois isso produziria correspondências falsas.
+    IDs CoinPaprika e CoinGecko não são intercambiáveis; usa mapeamento
+    validado e registra a fonte do histórico.
     """
     result = universe.copy()
     for column in HISTORY_METRIC_COLUMNS:
@@ -1318,14 +1468,14 @@ def enrich_with_price_history(
         if requests_made >= budget:
             break
         row = result.loc[idx]
-        if str(row.get("market_source", "")).upper() != "COINGECKO":
-            continue
         coin_id = str(row.get("coin_id", "")).strip()
         if not coin_id:
             continue
         requests_made += 1
         history, history_provider = _historical_chart_with_fallback(
-            coin_id, str(row.get("symbol", "")), days
+            coin_id, str(row.get("symbol", "")), days,
+            name=str(row.get("name", "")),
+            market_source=str(row.get("market_source", "COINGECKO")).upper(),
         )
         result.at[idx, "history_source"] = history_provider
         if history.empty:
@@ -1337,7 +1487,7 @@ def enrich_with_price_history(
             if pd.notna(value):
                 result.at[idx, key] = value
         print(f"[market_data] Histórico {coin_id} ({history_provider}): {len(history)} observações; retornos 90d={metrics.get('return_90d')}, 180d={metrics.get('return_180d')}, 365d={metrics.get('return_365d')}.")
-        time.sleep(1.5)
+        time.sleep(1.0)
     print(f"[market_data] Histórico: {requests_made} ativos consultados; {len(result)} ativos preservados.")
     return result
 
@@ -1351,10 +1501,12 @@ def fetch_price_history(
     days: int = 365,
     preferred_source: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Histórico real CoinGecko; nunca mistura identificadores CoinPaprika."""
-    if preferred_source and str(preferred_source).upper() != "COINGECKO":
+    """Histórico real por ID CoinGecko, com fallback auditável."""
+    source = str(preferred_source or "COINGECKO").upper()
+    if source not in {"COINGECKO", "COINPAPRIKA"}:
         return pd.DataFrame(columns=["date", "price", "volume", "historical_market_cap"])
-    return _coingecko_chart(coin_id, days=min(365, max(1, int(days))))
+    history, _ = _historical_chart_with_fallback(coin_id, "", days, market_source=source)
+    return history
 
 
 def calculate_return(
@@ -1433,7 +1585,12 @@ def calculate_return(
     ]
 
     if historical.empty:
-        return np.nan
+        # Candles diários podem estar deslocados algumas horas do alvo exato.
+        # Aceita apenas ponto a até 48h do alvo; não inventa retorno sem histórico.
+        near = history[(history["date"] > target_date) & (history["date"] <= target_date + pd.Timedelta(hours=48))]
+        if near.empty:
+            return np.nan
+        historical = near.iloc[:1]
 
     old_price = _safe_float(
         historical[
