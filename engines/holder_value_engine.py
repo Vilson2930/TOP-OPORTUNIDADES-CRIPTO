@@ -240,13 +240,9 @@ def extract_fee_distribution_ratio(
                 / 100
             )
 
-        return float(
-            np.clip(
-                explicit_ratio,
-                0,
-                1,
-            )
-        )
+        if not np.isfinite(explicit_ratio) or not 0 <= explicit_ratio <= 1:
+            return np.nan
+        return float(explicit_ratio)
 
     holder_revenue = (
         extract_holder_revenue(
@@ -377,7 +373,9 @@ def calculate_real_yield(
     if pd.isna(
         emission_yield
     ):
-        return staking_yield
+        # Sem decomposição entre rendimento orgânico e emissões,
+        # não é possível afirmar que staking_yield é real yield.
+        return np.nan
 
     return (
         staking_yield
@@ -904,19 +902,23 @@ def calculate_holder_value_score(
     ):
         return np.nan
 
+    # Uma única métrica não constitui evidência suficiente para
+    # uma pontuação global de captura de valor. Não transformamos
+    # ausência de informação em zero: a avaliação fica inconclusiva.
+    observed_components = sum(
+        not pd.isna(component_score)
+        for component_score, _ in components.values()
+    )
+    observed_economic_yield = not pd.isna(economic_yield_score)
+
+    if observed_components + int(observed_economic_yield) < 2:
+        return np.nan
+
     if pd.isna(base_score):
-        return round(
-            _clip_score(
-                economic_yield_score
-            ),
-            2,
-        )
+        return round(_clip_score(economic_yield_score), 2)
 
     if pd.isna(economic_yield_score):
-        return round(
-            _clip_score(base_score),
-            2,
-        )
+        return round(_clip_score(base_score), 2)
 
     # Preserve the original holder-value architecture while adding a
     # valuation-aware opportunity confirmation. This prevents fee share
@@ -940,6 +942,8 @@ def calculate_holder_value_score(
 def calculate_holder_capture_ratio(
     row: pd.Series,
 ) -> float:
+    # Holder revenue / protocol revenue, distinto de fee_distribution_ratio
+    # (holder revenue / protocol fees). Não confundir os denominadores.
 
     holder_revenue = (
         extract_holder_revenue(
@@ -1138,17 +1142,12 @@ def calculate_holder_data_completeness(
         ),
     ]
 
-    available = sum(
-        1
-        for value in values
-        if not pd.isna(value)
-    )
+    # O yield econômico do holder é uma evidência adicional,
+    # distinta de real yield e dos seis componentes originais.
+    values.append(extract_holder_revenue_yield(row))
+    available = sum(not pd.isna(value) for value in values)
 
-    return round(
-        available
-        / len(values),
-        4,
-    )
+    return round(available / len(values), 4)
 
 
 # ============================================================
