@@ -519,7 +519,7 @@ def _evaluate_asset(
         for match in (holders_match, revenue_match, fees_match)
         if match is not None
     }
-    source_consistent = len(verified_slugs) <= 1
+    source_consistent = len(verified_slugs) == 1  # No verified source is not consistency evidence.
     # Pre-existing fee/revenue observations have no verified shared lineage;
     # they cannot serve as a denominator for new holders revenue.
     fees_comparable = (
