@@ -359,26 +359,33 @@ def _candidate_matches(
     row: pd.Series,
     table: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Aceita somente identidade textual única, nunca ticker isolado."""
+    """Fail closed on ambiguous or conflicting asset-to-protocol identities.
+
+    A unique name match is insufficient when the asset's coin_id resolves
+    uniquely to a *different* protocol.  Ticker alone is never used.
+    """
     if table.empty:
         return table
 
-    name_key = _normalize_text(row.get("name"))
-    coin_id_key = _normalize_text(row.get("coin_id"))
-    for identity in (name_key, coin_id_key):
-        if not identity:
-            continue
+    identities = tuple(dict.fromkeys(filter(None, (
+        _normalize_text(row.get("name")),
+        _normalize_text(row.get("coin_id")),
+    ))))
+    resolved = []
+    for identity in identities:
         matches = table[
             (table["name_key"] == identity)
             | (table["display_name_key"] == identity)
             | (table["slug_key"] == identity)
-        ].copy()
-        if len(matches) == 1:
-            return matches
+        ]
         if len(matches) > 1:
-            # Ambiguidade não pode ser resolvida pela maior receita.
             return table.iloc[0:0].copy()
-    return table.iloc[0:0].copy()
+        if len(matches) == 1:
+            resolved.append(matches.index[0])
+
+    if not resolved or len(set(resolved)) != 1:
+        return table.iloc[0:0].copy()
+    return table.loc[[resolved[0]]].copy()
 
 
 def _best_match(
