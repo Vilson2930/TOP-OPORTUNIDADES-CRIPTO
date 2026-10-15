@@ -388,12 +388,63 @@ def score_fee_distribution(
 
 
 # ============================================================
+# 05B: RASTREABILIDADE E INDEPENDENCIA ECONOMICA
+# ============================================================
+
+def _evidence_text(row: pd.Series, names: Iterable[str]) -> str:
+    """Non-empty source/period/reference; booleans and NaN are not references."""
+    for name in names:
+        value = row.get(name)
+        if value is None or isinstance(value, (bool, np.bool_)):
+            continue
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"nan", "none", "null", "true", "false", "0"}:
+            return text
+    return ""
+
+
+def _verified_mechanism(row: pd.Series, kind: str) -> bool:
+    """Fail closed: verified flag, identifiable source, period and operation reference.
+
+    Flags must come from a separately audited ingestion pipeline; the engine
+    never infers verification from yield numbers or generic active booleans.
+    """
+    return (
+        _first_boolean(row, (f"{kind}_evidence_verified",)) is True
+        and bool(_evidence_text(row, (f"{kind}_evidence_source",)))
+        and bool(_evidence_text(row, (f"{kind}_evidence_period",)))
+        and bool(_evidence_text(row, (f"{kind}_evidence_reference",)))
+    )
+
+
+def _independent_burn(row: pd.Series) -> bool:
+    """Conservatively require explicit independent economic-flow identifiers.
+
+    A buyback followed by burn of the same tokens is ONE economic flow.
+    Different transaction hashes alone do not prove economic independence.
+    """
+    if not _verified_mechanism(row, "burn"):
+        return False
+    if not _verified_mechanism(row, "buyback"):
+        return True
+    buyback_flow = _evidence_text(row, ("buyback_economic_flow_id",))
+    burn_flow = _evidence_text(row, ("burn_economic_flow_id",))
+    return bool(buyback_flow and burn_flow and buyback_flow != burn_flow)
+
+
+# ============================================================
 # BUYBACK
 # ============================================================
 
 def calculate_buyback_score(
     row: pd.Series,
 ) -> float:
+
+    # 05B: unverified numerical values and active flags are NOT evidence.
+    if not _verified_mechanism(row, "buyback"):
+        return np.nan
 
     buyback_yield = _first_available(
         row,
@@ -482,6 +533,10 @@ def calculate_buyback_score(
 def calculate_burn_score(
     row: pd.Series,
 ) -> float:
+
+    # 05B: one buyback-and-burn economic flow must not be counted twice.
+    if not _independent_burn(row):
+        return np.nan
 
     burn_yield = _first_available(
         row,
