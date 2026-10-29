@@ -40,6 +40,7 @@ import sys
 import time
 import traceback
 from datetime import datetime, timezone
+from typing import Dict
 
 import numpy as np
 import pandas as pd
@@ -159,6 +160,15 @@ ENGINE_SUMMARY_FILE = os.path.join(
     OUTPUT_DIR,
     "engine_summary.txt",
 )
+
+WATCHLIST_RESULTS_FILE = os.path.join(
+    OUTPUT_DIR, "crypto_watchlist_top20.csv"
+)
+
+DIAGNOSTIC_RESULTS_FILE = os.path.join(
+    OUTPUT_DIR, "crypto_diagnostic_all.csv"
+)
+
 
 
 # ============================================================
@@ -753,6 +763,87 @@ def run_analysis_engines(
 
 
 # ============================================================
+# SECONDARY REPORTING — DOES NOT CHANGE DECISIONS
+# ============================================================
+
+def _boolean_true(value) -> bool:
+    """Fail closed for missing or ambiguous boolean fields."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def build_diagnostic_report(final_result: pd.DataFrame) -> pd.DataFrame:
+    """Preserve all original fields and append a reporting-only category."""
+    result = final_result.copy()
+    if result.empty:
+        result["report_category"] = pd.Series(dtype="object")
+        result["report_note"] = pd.Series(dtype="object")
+        return result
+
+    required = {"quality_gate", "hard_block", "signal", "opportunity_score"}
+    missing = required - set(result.columns)
+    if missing:
+        raise RuntimeError(
+            "Diagnostic report missing columns: " + ", ".join(sorted(missing))
+        )
+
+    approved_signals = {
+        str(config.SIGNAL_STRONG_ENTRY),
+        str(config.SIGNAL_ENTRY),
+    }
+    rejected_signals = {
+        str(config.SIGNAL_REJECTED),
+        str(config.SIGNAL_BLOCKED),
+    }
+
+    def classify(row):
+        gate = _boolean_true(row["quality_gate"])
+        blocked = not (row["hard_block"] is False or
+                       (isinstance(row["hard_block"], (bool, np.bool_))
+                        and not bool(row["hard_block"])) or
+                       (isinstance(row["hard_block"], str)
+                        and row["hard_block"].strip().lower() == "false"))
+        signal = str(row["signal"])
+        if gate and not blocked and signal in approved_signals:
+            return "APROVADA"
+        if blocked or signal in rejected_signals:
+            return "REPROVADA_EM_OBSERVACAO"
+        return "EM_OBSERVACAO"
+
+    result["report_category"] = result.apply(classify, axis=1)
+    result["report_note"] = result["report_category"].map({
+        "APROVADA": "Passou nas condicoes de relatorio; confirmar ranking oficial.",
+        "REPROVADA_EM_OBSERVACAO": "Reprovada ou bloqueada; apenas estudo, nao entrada.",
+        "EM_OBSERVACAO": "Nao aprovada; apenas estudo, nao entrada.",
+    })
+    return result
+
+
+def build_watchlist(final_result: pd.DataFrame, limit: int = 20) -> pd.DataFrame:
+    """Top diagnostic candidates; never grants approval or trade signals."""
+    diagnostic = build_diagnostic_report(final_result)
+    if diagnostic.empty:
+        return diagnostic
+    watch = diagnostic.loc[diagnostic["report_category"] != "APROVADA"].copy()
+    watch["_sort_score"] = pd.to_numeric(
+        watch["opportunity_score"], errors="coerce"
+    )
+    # Missing scores are not ranked as zero; put them last.
+    keys = ["_sort_score"]
+    ascending = [False]
+    if "symbol" in watch.columns:
+        keys.append("symbol")
+        ascending.append(True)
+    watch = watch.sort_values(
+        keys, ascending=ascending, na_position="last", kind="stable"
+    ).head(limit)
+    return watch.drop(columns=["_sort_score"]).reset_index(drop=True)
+
+
+# ============================================================
 # OUTPUT
 # ============================================================
 
@@ -774,6 +865,11 @@ def save_outputs(
         index=False,
     )
 
+    diagnostic = build_diagnostic_report(full_result)
+    watchlist = build_watchlist(full_result, limit=20)
+    diagnostic.to_csv(DIAGNOSTIC_RESULTS_FILE, index=False)
+    watchlist.to_csv(WATCHLIST_RESULTS_FILE, index=False)
+
     if not rejected_result.empty:
 
         rejected_result.to_csv(
@@ -792,6 +888,8 @@ def save_outputs(
     print(
         TOP_RESULTS_FILE
     )
+    print(DIAGNOSTIC_RESULTS_FILE)
+    print(WATCHLIST_RESULTS_FILE)
 
     if not rejected_result.empty:
 
@@ -901,6 +999,7 @@ def build_summary(
         "",
         "QUALITY",
         f"Quality Gate passed: {quality_pass}",
+        f"Diagnostic watchlist (NOT approved): {len(build_watchlist(final_result))}",
         "",
         "SIGNALS",
         f"STRONG_ENTRY: {strong_entry}",
@@ -1217,6 +1316,23 @@ def run_crypto_opportunity_engine() -> Dict:
         top_result
     )
 
+    print_header("TOP 20 EM OBSERVACAO — NAO APROVADAS")
+    watchlist = build_watchlist(final_result, limit=20)
+    if watchlist.empty:
+        print("Nenhuma candidata em observacao.")
+    else:
+        display_columns = [
+            name for name in (
+                "symbol", "name", "opportunity_score", "signal",
+                "quality_gate", "hard_block", "report_category",
+                "rejection_reasons", "rejection_reason", "block_reasons",
+                "holder_value_score", "holder_value_evidence_count",
+                "holder_value_confidence",
+            ) if name in watchlist.columns
+        ]
+        print(watchlist[display_columns].to_string(index=False))
+        print("ATENCAO: observacao nao equivale a aprovacao ou recomendacao de compra.")
+
     print_header(
         "ENGINE COMPLETED"
     )
@@ -1244,6 +1360,12 @@ def run_crypto_opportunity_engine() -> Dict:
 
         "top":
             top_result,
+
+        "watchlist":
+            watchlist,
+
+        "diagnostic":
+            build_diagnostic_report(final_result),
 
         "summary":
             summary,
