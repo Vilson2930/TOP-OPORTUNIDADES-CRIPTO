@@ -1321,16 +1321,27 @@ def run_crypto_opportunity_engine() -> Dict:
     if watchlist.empty:
         print("Nenhuma candidata em observacao.")
     else:
+        # Exibe os diagnosticos produzidos pelo ranking_engine sem recalcular
+        # scores, alterar Quality Gates ou promover candidatas a aprovadas.
         display_columns = [
             name for name in (
-                "symbol", "name", "opportunity_score", "signal",
-                "quality_gate", "hard_block", "report_category",
-                "rejection_reasons", "rejection_reason", "block_reasons",
-                "holder_value_score", "holder_value_evidence_count",
-                "holder_value_confidence",
+                "symbol", "name",
+                "opportunity_score_observed", "opportunity_score",
+                "opportunity_evidence_coverage", "opportunity_evidence_gate",
+                "fundamental_gate", "revenue_gate", "holder_value_gate",
+                "dilution_gate", "holder_value_score",
+                "holder_value_evidence_count", "holder_value_confidence",
+                "quality_failure_reasons", "hard_block_reasons",
+                "decision_confidence", "quality_gate", "hard_block",
+                "signal", "report_category",
             ) if name in watchlist.columns
         ]
-        print(watchlist[display_columns].to_string(index=False))
+        with pd.option_context(
+            "display.max_columns", None,
+            "display.width", 320,
+            "display.max_colwidth", 100,
+        ):
+            print(watchlist[display_columns].to_string(index=False))
         print("ATENCAO: observacao nao equivale a aprovacao ou recomendacao de compra.")
 
     print_header(
