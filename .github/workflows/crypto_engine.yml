@@ -47,6 +47,7 @@ jobs:
             config.py \
             holder_value_evidence_audit.py \
             holder_value_evidence_collector.py \
+            holder_value_discovery_engine.py \
             data \
             engines \
             reports
@@ -71,6 +72,13 @@ jobs:
             --registry holder_value_sources.csv \
             --diagnostic output/crypto_diagnostic_all.csv \
             --output output/holder_value_source_audit.csv
+
+      - name: Discover dynamic Holder Value sources
+        if: success()
+        run: |
+          python holder_value_discovery_engine.py \
+            --input output/crypto_diagnostic_all.csv \
+            --output output/holder_value_discovery.csv
 
       - name: Generate HTML report
         if: success()
