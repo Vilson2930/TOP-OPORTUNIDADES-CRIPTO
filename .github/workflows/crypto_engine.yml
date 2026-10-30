@@ -45,6 +45,7 @@ jobs:
           python -m compileall \
             main.py \
             config.py \
+            holder_value_evidence_audit.py \
             data \
             engines \
             reports
@@ -54,6 +55,13 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           python main.py
+
+      - name: Generate Holder Value evidence audit
+        if: success()
+        run: |
+          python holder_value_evidence_audit.py \
+            --input output/crypto_diagnostic_all.csv \
+            --output output/holder_value_evidence_audit.csv
 
       - name: Generate HTML report
         if: success()
