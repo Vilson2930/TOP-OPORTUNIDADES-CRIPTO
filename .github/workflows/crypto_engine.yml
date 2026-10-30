@@ -46,6 +46,7 @@ jobs:
             main.py \
             config.py \
             holder_value_evidence_audit.py \
+            holder_value_evidence_collector.py \
             data \
             engines \
             reports
@@ -62,6 +63,14 @@ jobs:
           python holder_value_evidence_audit.py \
             --input output/crypto_diagnostic_all.csv \
             --output output/holder_value_evidence_audit.csv
+
+      - name: Collect Holder Value documentary sources
+        if: success()
+        run: |
+          python holder_value_evidence_collector.py \
+            --registry holder_value_sources.csv \
+            --diagnostic output/crypto_diagnostic_all.csv \
+            --output output/holder_value_source_audit.csv
 
       - name: Generate HTML report
         if: success()
