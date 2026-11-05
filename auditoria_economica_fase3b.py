@@ -1,128 +1,235 @@
 #!/usr/bin/env python3
-"""Fase 3B: auditoria read-only de evidencias economicas do Crypto Opportunity Engine.
-Nao recalcula scores, nao promove gates, nao confirma captura economica.
+"""Fase 3C: coleta read-only de series economicas publicas DefiLlama.
+
+Nao modifica motor, scores, gates, ou classificacoes. Dados agregados de
+holders revenue NAO sao prova independente de fluxo ao token especifico.
 """
 import argparse
+import hashlib
 import json
-from pathlib import Path
+import math
+import time
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import quote
+
 import pandas as pd
+import requests
 
-DEFAULT_SYMBOLS = ('INJ', 'AVAX', 'XPL', 'ETH')
-FIELDS = [
- 'coin_id','symbol','name','price','market_cap','fdv','return_30d','return_90d','return_180d','return_365d','price_change_30d',
- 'annualized_revenue','annualized_fees','revenue_growth','fees_growth','revenue_growth_method','revenue_annualization_basis',
- 'revenue_data_source','revenue_data_protocol_slug','revenue_match_status','revenue_source_status',
- 'holder_revenue','holder_revenue_annualized','holder_revenue_yield','holder_capture_ratio','fee_distribution_ratio',
- 'holder_value_protocol_revenue','holder_value_protocol_fees','holder_value_protocol_slug','holder_value_data_source',
- 'holder_value_holders_match_status','holder_value_revenue_match_status','holder_value_fees_match_status',
- 'holder_value_cross_source_consistent','holder_value_fee_ratio_verified','holder_value_capture_ratio_verified',
- 'holder_value_evidence_count','holder_value_evidence_sufficient','holder_value_evidence_status','holder_value_quality_gate',
- 'buyback_active','burn_active','token_required_for_usage','gas_token','economic_staking','real_yield',
- 'fundamental_change_90d','fundamental_price_divergence','fundamental_price_divergence_score',
- 'revenue_price_divergence','revenue_price_divergence_score','opportunity_score','fundamental_gate','revenue_gate',
- 'holder_value_gate','dilution_gate','quality_gate','hard_block','quality_failure_reasons','signal',
- 'last_updated','market_source','history_source'
-]
+SYMBOLS = ('INJ', 'AVAX', 'XPL', 'ETH')
+DATA_TYPES = ('dailyFees', 'dailyRevenue', 'dailyHoldersRevenue')
+BASE = 'https://api.llama.fi/summary/fees/'
 
-def missing(v):
-    if v is None: return True
+
+def num(value):
     try:
-        if bool(pd.isna(v)): return True
-    except (TypeError, ValueError): pass
-    return isinstance(v,str) and not v.strip()
+        v = float(value)
+        return v if math.isfinite(v) else None
+    except (TypeError, ValueError):
+        return None
 
-def number(v):
-    if missing(v): return None
+
+def clean(value):
+    if value is None:
+        return None
     try:
-        x=float(v)
-        return x if pd.notna(x) and abs(x)!=float('inf') else None
-    except (ValueError,TypeError): return None
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value.item() if hasattr(value, 'item') else value
 
-def truth(v):
-    return str(v).strip().lower() in ('true','1','yes') if not missing(v) else False
 
-def as_json(v):
-    if missing(v): return None
-    if isinstance(v,(bool,int,float,str)):
-        if isinstance(v,float) and not pd.notna(v): return None
-        return v
-    return str(v)
+def get_json(session, url, datatype, timeout, retries, pause):
+    for attempt in range(retries + 1):
+        try:
+            resp = session.get(url, params={'dataType': datatype}, timeout=timeout)
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(min(12, 2 ** attempt + pause))
+                continue
+            resp.raise_for_status()
+            obj = resp.json()
+            if not isinstance(obj, dict):
+                raise ValueError('JSON root is not an object')
+            return obj, None, resp.url
+        except (requests.RequestException, ValueError) as exc:
+            if attempt == retries:
+                return None, f'{type(exc).__name__}: {str(exc)[:200]}', url
+            time.sleep(min(12, 2 ** attempt + pause))
+    return None, 'UNEXPECTED', url
 
-def analyze(row):
-    d={k:as_json(row.get(k)) for k in FIELDS}
-    flags=[]
-    rev=number(d['annualized_revenue'])
-    holder=number(d['holder_revenue'])
-    ratio=number(d['holder_capture_ratio'])
-    if rev is not None and holder is not None and abs(rev-holder)<=max(0.01,abs(rev)*1e-9):
-        flags.append('HOLDER_REVENUE_EQUALS_PROTOCOL_REVENUE_REQUIRES_INDEPENDENT_ATTRIBUTION')
-    if ratio is not None and ratio>=0.999:
-        flags.append('REPORTED_CAPTURE_RATIO_100_PERCENT_NOT_PROOF_OF_TOKEN_DISTRIBUTION')
-    if holder is None: flags.append('HOLDER_REVENUE_MISSING')
-    if missing(d['revenue_growth']): flags.append('REVENUE_GROWTH_MISSING')
-    if missing(d['revenue_price_divergence_score']): flags.append('REVENUE_PRICE_DIVERGENCE_SCORE_MISSING')
-    if missing(d['fundamental_price_divergence_score']): flags.append('FUNDAMENTAL_PRICE_DIVERGENCE_SCORE_MISSING')
-    if not truth(d['holder_value_evidence_sufficient']): flags.append('HOLDER_VALUE_EVIDENCE_NOT_SUFFICIENT')
-    if not truth(d['holder_value_gate']): flags.append('HOLDER_VALUE_GATE_FAILED')
-    if truth(d['hard_block']): flags.append('HARD_BLOCK_PRESENT')
-    if truth(d['holder_value_capture_ratio_verified']):
-        flags.append('INTERNAL_CAPTURE_RATIO_VERIFIED_FLAG_NOT_INDEPENDENT_ECONOMIC_PROOF')
-    methods=[k for k in ('buyback_active','burn_active','economic_staking','real_yield','fee_distribution_ratio') if not missing(d[k])]
-    if not methods: flags.append('NO_EXPLICIT_ECONOMIC_MECHANISM_FIELDS_POPULATED')
-    # Returns are stored as fractions in the engine; do not equate TVL growth with revenue growth.
-    price90=number(d['return_90d'])
-    fund90=number(d['fundamental_change_90d'])
-    d['observed_90d_fundamental_minus_price']=round(fund90-price90,8) if price90 is not None and fund90 is not None else None
-    d['observed_90d_comparison_note']='DESCRIPTIVE_ONLY_NOT_ORIGINAL_ENGINE_SCORE' if d['observed_90d_fundamental_minus_price'] is not None else 'INSUFFICIENT_COMPARABLE_90D_DATA'
-    d['audit_flags']='|'.join(flags)
-    d['audit_flag_count']=len(flags)
-    d['economic_capture_independently_proven']=False
-    d['audit_conclusion']='INVESTIGATE_ONLY_NO_GATE_PROMOTION'
-    return d
+
+def daily_chart(payload):
+    """Accept only explicitly dated numeric [timestamp, value] chart points."""
+    if not isinstance(payload, dict):
+        return {}
+    result = {}
+    for item in payload.get('totalDataChart') or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        ts, value = num(item[0]), num(item[1])
+        if ts is None or value is None or ts <= 0 or value < 0:
+            continue
+        day = datetime.fromtimestamp(ts, timezone.utc).strftime('%Y-%m-%d')
+        result[day] = value
+    return result
+
+
+def window_compare(chart, end_day):
+    """30d current vs preceding 30d, ending at latest available day."""
+    dates = sorted(d for d in chart if d <= end_day)
+    if len(dates) < 60:
+        return None, None, None, 'LESS_THAN_60_DAILY_OBSERVATIONS'
+    from datetime import date, timedelta
+    end = date.fromisoformat(end_day)
+    current_days = [(end - timedelta(days=i)).isoformat() for i in range(30)]
+    prior_days = [(end - timedelta(days=i)).isoformat() for i in range(30, 60)]
+    if not all(d in chart for d in current_days + prior_days):
+        return None, None, None, 'NON_CONTIGUOUS_60_DAYS'
+    current = sum(chart[d] for d in current_days)
+    prior = sum(chart[d] for d in prior_days)
+    growth = current / prior - 1 if prior > 0 else None
+    return current, prior, growth, 'COMPARABLE_30D_WINDOWS' if prior > 0 else 'ZERO_PRIOR_BASE'
+
 
 def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument('--input',default='output/crypto_diagnostic_all.csv')
-    ap.add_argument('--output-dir',default='output/fase3b_auditoria')
-    ap.add_argument('--symbols',default=','.join(DEFAULT_SYMBOLS))
-    args=ap.parse_args()
-    source=Path(args.input)
-    if not source.is_file(): raise FileNotFoundError(source)
-    df=pd.read_csv(source,low_memory=False)
-    if 'symbol' not in df.columns: raise ValueError('Missing symbol column')
-    symbols=[x.strip().upper() for x in args.symbols.split(',') if x.strip()]
-    subset=df[df['symbol'].astype(str).str.upper().isin(symbols)].copy()
-    if 'opportunity_score' in subset.columns:
-        subset=subset.sort_values('opportunity_score',ascending=False,na_position='last')
-    found=set(subset['symbol'].astype(str).str.upper())
-    absent=[s for s in symbols if s not in found]
-    if absent: raise ValueError('Missing requested symbols: '+', '.join(absent))
-    rows=[analyze(row) for _,row in subset.iterrows()]
-    out=Path(args.output_dir)
-    out.mkdir(parents=True,exist_ok=True)
-    audit=pd.DataFrame(rows)
-    csv_path=out/'fase3b_economic_audit.csv'
-    json_path=out/'fase3b_economic_audit.json'
-    audit.to_csv(csv_path,index=False,encoding='utf-8-sig')
-    payload={'generated_at_utc':datetime.now(timezone.utc).isoformat(), 'source_file':str(source),
-      'source_rows':len(df),'target_symbols':symbols,'rows':rows,
-      'scope':'READ_ONLY_EVIDENCE_DIAGNOSTIC','gates_modified':False,'scores_modified':False,
-      'warning':'Aggregator matching and internal verified flags do not prove tokenholder cash flows.'}
-    json_path.write_text(json.dumps(payload,ensure_ascii=False,indent=2,default=str),encoding='utf-8')
-    print('=== FASE 3B - AUDITORIA ECONOMICA ===')
-    print('Registros no universo:',len(df),'| registros selecionados:',len(audit))
-    cols=['symbol','opportunity_score','annualized_revenue','revenue_growth','holder_revenue',
-      'holder_capture_ratio','holder_value_evidence_count','holder_value_evidence_status',
-      'revenue_price_divergence_score','observed_90d_fundamental_minus_price',
-      'holder_value_gate','hard_block','audit_flag_count']
-    print(audit[cols].to_string(index=False))
-    print('\n=== ALERTAS POR ATIVO ===')
-    for row in rows:
-        print('\n'+str(row['symbol'])+':')
-        for flag in row['audit_flags'].split('|'): print(' -',flag)
-    print('\nCSV:',csv_path.resolve())
-    print('JSON:',json_path.resolve())
-    print('Nenhum score ou gate alterado. Nenhuma captura economica confirmada automaticamente.')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input', default='output/crypto_diagnostic_all.csv')
+    parser.add_argument('--output-dir', default='output/fase3c_auditoria')
+    parser.add_argument('--symbols', default=','.join(SYMBOLS))
+    parser.add_argument('--timeout', type=int, default=20)
+    parser.add_argument('--retries', type=int, default=2)
+    parser.add_argument('--pause', type=float, default=0.6)
+    parser.add_argument('--offline', action='store_true', help='Use somente cache ja coletado')
+    args = parser.parse_args()
+    source = Path(args.input)
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    df = pd.read_csv(source, low_memory=False)
+    needed = {'symbol', 'coin_id', 'holder_value_protocol_slug', 'revenue_data_protocol_slug'}
+    missing = needed.difference(df.columns)
+    if missing:
+        raise ValueError('Missing required columns: ' + ', '.join(sorted(missing)))
+    symbols = [s.strip().upper() for s in args.symbols.split(',') if s.strip()]
+    subset = df[df.symbol.astype(str).str.upper().isin(symbols)].copy()
+    if subset.empty:
+        raise ValueError('No selected assets in input')
+    absent = sorted(set(symbols) - set(subset.symbol.astype(str).str.upper()))
+    if absent:
+        raise ValueError('Symbols missing: ' + ', '.join(absent))
+    if subset.symbol.astype(str).str.upper().duplicated().any():
+        raise ValueError('Ambiguous duplicate symbol: select by coin_id before audit')
 
-if __name__=='__main__': main()
+    output = Path(args.output_dir)
+    cache = output / 'raw_defillama'
+    cache.mkdir(parents=True, exist_ok=True)
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'CryptoOpportunityEngine-ReadOnlyResearch/3C', 'Accept': 'application/json'})
+    records = []
+    for _, item in subset.iterrows():
+        sym = str(item['symbol']).upper()
+        slug_holder = clean(item.get('holder_value_protocol_slug'))
+        slug_revenue = clean(item.get('revenue_data_protocol_slug'))
+        slug = str(slug_holder or slug_revenue or '').strip()
+        record = {
+            'symbol': sym, 'coin_id': clean(item.get('coin_id')),
+            'defillama_slug': slug or None,
+            'slug_consistency': 'MATCH' if slug_holder and slug_revenue and str(slug_holder) == str(slug_revenue) else 'NOT_ESTABLISHED',
+            'original_opportunity_score': clean(item.get('opportunity_score')),
+            'original_holder_value_gate': clean(item.get('holder_value_gate')),
+            'original_hard_block': clean(item.get('hard_block')),
+            'engine_annualized_revenue': clean(item.get('annualized_revenue')),
+            'engine_holder_revenue': clean(item.get('holder_revenue')),
+            'engine_holder_capture_ratio': clean(item.get('holder_capture_ratio')),
+            'engine_revenue_growth': clean(item.get('revenue_growth')),
+            'engine_return_90d': clean(item.get('return_90d')),
+            'capture_independently_proven': False,
+            'gate_modified': False,
+            'source_identity_status': 'NOT_VERIFIED',
+            'methodology_url': None,
+            'methodology_text': None,
+            'evidence_limit': 'AGGREGATOR_DATA_NOT_ONCHAIN_PROOF_OF_TOKEN_CAPTURE',
+        }
+        if not slug or '/' in slug or '\\' in slug:
+            record['collection_status'] = 'NO_SAFE_PROTOCOL_SLUG'
+            records.append(record)
+            continue
+        url = BASE + quote(slug, safe='')
+        source_names = []
+        success = 0
+        for kind in DATA_TYPES:
+            cache_file = cache / f'{sym}_{kind}.json'
+            payload, err, final_url = None, None, url + '?dataType=' + kind
+            if args.offline:
+                if cache_file.exists():
+                    try:
+                        payload = json.loads(cache_file.read_text(encoding='utf-8'))
+                    except (ValueError, OSError) as exc:
+                        err = 'CACHE_INVALID: ' + str(exc)[:150]
+                else:
+                    err = 'OFFLINE_CACHE_MISSING'
+            else:
+                payload, err, final_url = get_json(session, url, kind, args.timeout, args.retries, args.pause)
+                if payload is not None:
+                    cache_file.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+                time.sleep(args.pause)
+            prefix = kind.replace('daily', '').lower()
+            record[prefix + '_source_url'] = final_url
+            record[prefix + '_fetch_status'] = 'OK' if payload is not None else (err or 'FAILED')
+            record[prefix + '_raw_cache'] = str(cache_file) if payload is not None else None
+            record[prefix + '_raw_sha256'] = hashlib.sha256(cache_file.read_bytes()).hexdigest() if payload is not None and cache_file.exists() else None
+            if payload is None:
+                continue
+            success += 1
+            source_names.append(str(payload.get('name') or ''))
+            if kind == 'dailyHoldersRevenue':
+                record['methodology_url'] = payload.get('methodologyURL')
+                method = payload.get('methodology')
+                record['methodology_text'] = json.dumps(method, ensure_ascii=False)[:2000] if method is not None else None
+            record[prefix + '_protocol_name'] = payload.get('name')
+            record[prefix + '_gecko_id'] = payload.get('gecko_id')
+            record[prefix + '_latest_fetch_ok'] = payload.get('latestFetchIsOk')
+            record[prefix + '_reported_30d'] = num(payload.get('total30d'))
+            chart = daily_chart(payload)
+            record[prefix + '_daily_points'] = len(chart)
+            record[prefix + '_last_day'] = max(chart) if chart else None
+            if chart:
+                a, b, growth, state = window_compare(chart, max(chart))
+                record[prefix + '_last30_sum'] = a
+                record[prefix + '_previous30_sum'] = b
+                record[prefix + '_30d_vs_previous30d'] = growth
+                record[prefix + '_comparison_status'] = state
+            else:
+                record[prefix + '_comparison_status'] = 'NO_DATED_HISTORY'
+        record['collection_status'] = f'{success}/3_TYPES_FETCHED'
+        record['source_names'] = '|'.join(source_names)
+        gecko_ids = [record.get(k + '_gecko_id') for k in ('fees', 'revenue', 'holdersrevenue')]
+        valid_ids = [str(x) for x in gecko_ids if x]
+        record['source_identity_status'] = ('GECKO_ID_MATCH_AGGREGATOR_ONLY' if valid_ids and all(x == str(record['coin_id']) for x in valid_ids)
+                                            else 'GECKO_ID_CONFLICT_OR_MISSING')
+        # Deliberately no automatic confirmation even when aggregator gecko_id matches.
+        records.append(record)
+        print(f'{sym}: {record["collection_status"]} | {record["source_identity_status"]}', flush=True)
+
+    result = pd.DataFrame(records)
+    csv_path = output / 'fase3c_economic_evidence.csv'
+    json_path = output / 'fase3c_economic_evidence.json'
+    result.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    manifest = {
+        'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_input': str(source), 'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+        'read_only': True, 'engine_gates_modified': False, 'engine_scores_modified': False,
+        'disclaimer': 'DefiLlama classifications are aggregator assertions, not independently verified token distributions or burns.',
+        'records': records,
+    }
+    json_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    print('\n=== FASE 3C: EVIDENCIAS ECONOMICAS (SEM PROMOCAO DE GATES) ===')
+    cols = ['symbol', 'collection_status', 'source_identity_status', 'revenue_30d_vs_previous30d',
+            'holdersrevenue_30d_vs_previous30d', 'holdersrevenue_last30_sum', 'capture_independently_proven']
+    print(result[cols].to_string(index=False))
+    print('\nCSV:', csv_path.resolve(), '\nJSON:', json_path.resolve())
+    print('Dados novos sao apenas evidencias externas rastreaveis; nenhuma aprovacao automatica.')
+
+
+if __name__ == '__main__':
+    main()
