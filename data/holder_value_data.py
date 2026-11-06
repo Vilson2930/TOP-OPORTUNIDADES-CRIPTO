@@ -44,6 +44,7 @@ MAX_RETRIES = 2
 RETRY_SLEEP_SECONDS = 2.0
 
 DEFILLAMA_FEES_OVERVIEW_URL = "https://api.llama.fi/overview/fees"
+DEFILLAMA_PROTOCOL_REGISTRY_URL = "https://api.llama.fi/protocols"
 
 # Somente datasets agregados. Nunca uma URL por ativo.
 DATA_TYPES = (
@@ -267,6 +268,112 @@ def _request_overview(
             return None
 
     return None
+
+
+# ============================================================
+# DESCOBERTA AUTOMÁTICA DE IDENTIDADE / FONTES
+# ============================================================
+
+def _fetch_protocol_registry(session: requests.Session) -> pd.DataFrame:
+    """Catálogo agregado: descobre fontes, não prova captura de valor."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = session.get(
+                DEFILLAMA_PROTOCOL_REGISTRY_URL,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code == 429:
+                print("[holder_value_data] Catálogo: rate limit; pendente para próxima execução.")
+                return pd.DataFrame()
+            if response.status_code >= 500 and attempt < MAX_RETRIES:
+                time.sleep(RETRY_SLEEP_SECONDS)
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                return pd.DataFrame()
+            rows = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                slug = item.get("slug")
+                rows.append({
+                    "name_key": _normalize_text(name),
+                    "slug_key": _normalize_text(slug),
+                    "protocol_name": name,
+                    "protocol_slug": slug,
+                    "protocol_url": item.get("url"),
+                    "protocol_chains": item.get("chains"),
+                    "protocol_category": item.get("category"),
+                })
+            return pd.DataFrame(rows)
+        except (requests.RequestException, ValueError, TypeError) as error:
+            print(f"[holder_value_data] Catálogo: tentativa {attempt}: {error}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_SLEEP_SECONDS)
+    return pd.DataFrame()
+
+
+def _discover_protocol(row: pd.Series, registry: pd.DataFrame) -> dict:
+    """Resolução conservadora por identidade exata, nunca somente ticker."""
+    empty = {
+        "holder_value_discovery_status": "NOT_FOUND",
+        "holder_value_discovery_protocol": None,
+        "holder_value_discovery_slug": None,
+        "holder_value_discovery_url": None,
+        "holder_value_discovery_chains": None,
+        "holder_value_discovery_category": None,
+    }
+    if registry.empty:
+        return {**empty, "holder_value_discovery_status": "PENDING_RETRY"}
+    identities = tuple(dict.fromkeys(filter(None, (
+        _normalize_text(row.get("name")),
+        _normalize_text(row.get("coin_id")),
+    ))))
+    matched = set()
+    for identity in identities:
+        candidates = registry.index[
+            registry["name_key"].eq(identity) |
+            registry["slug_key"].eq(identity)
+        ].tolist()
+        if len(candidates) > 1:
+            return {**empty, "holder_value_discovery_status": "AMBIGUOUS"}
+        matched.update(candidates)
+    if len(matched) > 1:
+        return {**empty, "holder_value_discovery_status": "CONFLICTING"}
+    if not matched:
+        return empty
+    item = registry.loc[next(iter(matched))]
+    chains = item.get("protocol_chains")
+    return {
+        "holder_value_discovery_status": "IDENTITY_MATCHED_NOT_ECONOMICALLY_VERIFIED",
+        "holder_value_discovery_protocol": item.get("protocol_name"),
+        "holder_value_discovery_slug": item.get("protocol_slug"),
+        "holder_value_discovery_url": item.get("protocol_url"),
+        "holder_value_discovery_chains": "|".join(chains) if isinstance(chains, list) else None,
+        "holder_value_discovery_category": item.get("protocol_category"),
+    }
+
+
+def _missing_evidence(row: pd.Series) -> str:
+    """Fila de investigação; nunca transforma ausência em evidência positiva."""
+    pending = []
+    if not bool(row.get("holder_value_fee_ratio_verified", False)):
+        pending.append("FEE_DISTRIBUTION_PROVENANCE")
+    for prefix in ("buyback", "burn"):
+        verified = row.get(f"{prefix}_verified", False)
+        if not isinstance(verified, (bool, np.bool_)) or not verified:
+            pending.append(f"{prefix.upper()}_ONCHAIN_VERIFICATION")
+    for field, label in (
+        ("real_yield", "ORGANIC_YIELD_VS_EMISSIONS"),
+        ("token_required_for_usage", "TOKEN_UTILITY_DOCUMENTATION"),
+        ("economic_staking", "ECONOMIC_STAKING_DOCUMENTATION"),
+    ):
+        value = row.get(field, np.nan)
+        if value is None or (not isinstance(value, (list, dict)) and pd.isna(value)):
+            pending.append(label)
+    return "|".join(pending)
 
 
 # ============================================================
@@ -713,6 +820,15 @@ def enrich_with_holder_value_data(
         f"Fees: {len(fees_table)} protocolos utilizáveis."
     )
 
+    print("[holder_value_data] Descobrindo identidades e fontes oficiais (catálogo agregado).")
+    registry = _fetch_protocol_registry(session)
+    discovery = pd.DataFrame(
+        [_discover_protocol(row, registry) for _, row in result.iterrows()],
+        index=result.index,
+    )
+    for column in discovery.columns:
+        result[column] = discovery[column]
+
     evaluations = []
     total = len(result)
 
@@ -781,6 +897,15 @@ def enrich_with_holder_value_data(
         preserved = (result["holder_revenue"].notna() &
                      result["holder_value_data_source"].eq("DATA_INSUFFICIENT"))
         result.loc[preserved, "holder_value_data_source"] = "PREEXISTING_DATA"
+
+    # A fila de evidências fica visível para coleta on-chain/documental posterior.
+    # Uma identidade de protocolo não é prova de captura de valor pelo token.
+    result["holder_value_missing_evidence"] = result.apply(_missing_evidence, axis=1)
+    result["holder_value_evidence_search_status"] = np.where(
+        result["holder_value_missing_evidence"].eq(""),
+        "NO_MISSING_FIELDS_DETECTED_REQUIRES_GATE_VALIDATION",
+        "PENDING_INDEPENDENT_VERIFICATION",
+    )
 
     matched = int(
         result["holder_revenue"]
