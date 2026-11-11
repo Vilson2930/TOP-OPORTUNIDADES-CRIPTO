@@ -48,6 +48,7 @@ jobs:
             holder_value_evidence_audit.py \
             holder_value_evidence_collector.py \
             holder_value_discovery_engine.py \
+            holder_value_auto_discovery.py \
             data \
             engines \
             reports
@@ -79,6 +80,14 @@ jobs:
           python holder_value_discovery_engine.py \
             --input output/crypto_diagnostic_all.csv \
             --output output/holder_value_discovery.csv
+
+      - name: Collect automatic Holder Value source candidates
+        if: success()
+        run: |
+          python holder_value_auto_discovery.py \
+            --discovery output/holder_value_discovery.csv \
+            --output output/holder_value_auto_sources.csv \
+            --max-candidates 30
 
       - name: Generate HTML report
         if: success()
