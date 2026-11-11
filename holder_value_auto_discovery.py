@@ -1,8 +1,8 @@
-"""Bounded, read-only Holder Value documentary research (v2).
+"""Bounded, read-only Holder Value documentary research (v3).
 
 Inputs: output/holder_value_discovery.csv; optional output/crypto_diagnostic_all.csv.
 Outputs: output/holder_value_auto_sources.csv, output/holder_value_auto_documents.csv,
-         output/holder_value_auto_summary.json.
+         output/holder_value_auto_claims.csv, output/holder_value_auto_summary.json.
 
 Document mentions and HTTP retrieval NEVER verify economic capture, on-chain
 transactions, token attribution, payment periods, or independent evidence.
@@ -53,6 +53,86 @@ DOCUMENT_FIELDS = [
     "token_mentioned", "mechanism_documented", "period_verified", "onchain_verified",
     "independent_source_verified", "economic_mechanism_verified", "evidence_scope", "audit_note",
 ]
+
+
+CLAIM_FIELDS = [
+    "coin_id", "symbol", "protocol_slug", "document_url", "content_sha256",
+    "retrieved_at_utc", "mechanism_type", "matched_expression",
+    "context_excerpt", "token_mentioned_in_context", "period_mentioned_in_context",
+    "potential_double_counting", "source_type", "evidence_status",
+    "economic_mechanism_verified", "independent_verification_required",
+    "audit_note",
+]
+
+# Discovery patterns are intentionally only leads. In particular, a generic
+# mention of staking, burn or distribution is not a token-holder payment.
+CLAIM_PATTERNS = {
+    "BUYBACK": (r"\bbuy[ -]?backs?\b", r"\brepurchas(?:e|es|ed|ing)\b"),
+    "BURN": (r"\btoken[s]? burn(?:ed|ing|s)?\b", r"\bburn(?:ed|ing|s)? (?:of )?tokens?\b",
+             r"\bfee burn\b"),
+    "FEE_DISTRIBUTION": (r"\bfee(?:s)? distribut(?:ion|ed|ions)\b",
+                         r"\brevenue shar(?:e|ing)\b", r"\bfee shar(?:e|ing)\b"),
+    "STAKING_YIELD": (r"\bstaking rewards?\b", r"\breal yield\b",
+                      r"\bstakers? receiv(?:e|es|ing)\b"),
+}
+PERIOD_PATTERN = re.compile(
+    r"\b(?:20\d{2}|(?:last|past)\s+\d+\s+(?:days?|months?|years?)|"
+    r"\d+\s*[- ]?day|monthly|quarterly|annually|per year)\b", re.I
+)
+
+
+def extract_claims(documents: pd.DataFrame) -> pd.DataFrame:
+    """Extract bounded textual leads from retrieved excerpts, NEVER verification.
+
+    Full-page content is not retained by the original collector. This routine
+    only searches the first 1,200 visible characters of each fetched document;
+    an empty result means no matching lead in that excerpt, not no mechanism.
+    """
+    rows = []
+    for _, doc in documents.iterrows():
+        if str(doc.get("fetch_status", "")) != "RETRIEVED_UNVERIFIED":
+            continue
+        excerpt = str(doc.get("document_excerpt", ""))
+        symbol = str(doc.get("symbol", "")).strip()
+        if not excerpt:
+            continue
+        for mechanism, patterns in CLAIM_PATTERNS.items():
+            matches = []
+            for pattern in patterns:
+                matches.extend(re.finditer(pattern, excerpt, re.I))
+            # At most two leads of each type per document, avoiding repeated text.
+            seen = set()
+            for match in sorted(matches, key=lambda m: m.start()):
+                context = excerpt[max(0, match.start()-160):min(len(excerpt), match.end()+160)]
+                key = (mechanism, context.casefold())
+                if key in seen:
+                    continue
+                seen.add(key)
+                token_mentioned = bool(symbol and re.search(
+                    r"(?<![A-Za-z0-9])" + re.escape(symbol) + r"(?![A-Za-z0-9])",
+                    context, re.I))
+                rows.append({
+                    "coin_id": doc.get("coin_id", ""),
+                    "symbol": symbol,
+                    "protocol_slug": doc.get("protocol_slug", ""),
+                    "document_url": doc.get("document_url", ""),
+                    "content_sha256": doc.get("content_sha256", ""),
+                    "retrieved_at_utc": doc.get("retrieved_at_utc", ""),
+                    "mechanism_type": mechanism,
+                    "matched_expression": match.group(0),
+                    "context_excerpt": context,
+                    "token_mentioned_in_context": token_mentioned,
+                    "period_mentioned_in_context": bool(PERIOD_PATTERN.search(context)),
+                    "potential_double_counting": mechanism in {"BUYBACK", "BURN"},
+                    "source_type": "PROTOCOL_DOCUMENT_CANDIDATE",
+                    "evidence_status": "TEXTUAL_LEAD_UNVERIFIED",
+                    "economic_mechanism_verified": False,
+                    "independent_verification_required": True,
+                    "audit_note": "Text mention only; verify token identity, cash flow, period and independent on-chain or financial records",
+                })
+                if len(seen) >= 2:
+                    break
+    return pd.DataFrame(rows, columns=CLAIM_FIELDS)
 
 
 def _valid_url(url: str) -> bool:
@@ -323,6 +403,9 @@ def main() -> None:
     results.to_csv(output, index=False, encoding="utf-8-sig")
     doc_path = output.with_name("holder_value_auto_documents.csv")
     docs.to_csv(doc_path, index=False, encoding="utf-8-sig")
+    claims = extract_claims(docs)
+    claim_path = output.with_name("holder_value_auto_claims.csv")
+    claims.to_csv(claim_path, index=False, encoding="utf-8-sig")
     summary = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input": str(source), "input_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -333,8 +416,12 @@ def main() -> None:
         "document_links_discovered": int(pd.to_numeric(results["document_candidate_count"], errors="coerce").fillna(0).sum()),
         "documents_attempted": len(docs),
         "documents_retrieved": int((docs["fetch_status"] == "RETRIEVED_UNVERIFIED").sum()),
+        "textual_leads_unverified": len(claims),
+        "documents_with_textual_leads": int(claims["document_url"].nunique()),
+        "claims_report": str(claim_path),
+        "claim_extraction_scope": "FIRST_1200_CHARACTERS_OF_RETRIEVED_DOCUMENTS",
         "economic_mechanisms_verified": 0, "approval_flags_modified": False,
-        "warning": "Document mentions are not proof of token value capture or independent on-chain verification",
+        "warning": "Textual leads are NOT proof of token value capture, payment, period or independent on-chain verification",
     }
     output.with_name("holder_value_auto_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
