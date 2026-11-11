@@ -1,20 +1,22 @@
-"""Read-only, bounded documentary candidate discovery for Holder Value.
+"""Bounded, read-only Holder Value documentary research (v2).
 
-Inputs: output/holder_value_discovery.csv and optional
-        output/crypto_diagnostic_all.csv.
-Outputs: output/holder_value_auto_sources.csv,
+Inputs: output/holder_value_discovery.csv; optional output/crypto_diagnostic_all.csv.
+Outputs: output/holder_value_auto_sources.csv, output/holder_value_auto_documents.csv,
          output/holder_value_auto_summary.json.
 
-Never asserts economic verification or changes scoring / Quality Gates.
-Candidate documents are links, not evidence of token-holder value capture.
+Document mentions and HTTP retrieval NEVER verify economic capture, on-chain
+transactions, token attribution, payment periods, or independent evidence.
+No investment dataset, scoring field, or Quality Gate is modified.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import html
+from html.parser import HTMLParser
 import ipaddress
 import json
+import math
 import re
 import socket
 from datetime import datetime, timezone
@@ -26,27 +28,34 @@ import requests
 
 MAX_CANDIDATES = 30
 MAX_BYTES = 250_000
-TIMEOUT = (5, 12)
 MAX_LINKS_PER_SITE = 5
-KEYWORDS = {
-    "buyback": ("buyback", "buy-back", "repurchase"),
-    "burn": ("burn", "burning", "tokenomics"),
-    "distribution": ("distribution", "revenue share", "fee sharing", "fees"),
-    "staking": ("staking", "real yield", "yield", "rewards"),
-    "governance": ("governance", "docs", "documentation", "whitepaper"),
+MAX_DOCUMENTS_TOTAL = 30
+TIMEOUT = (5, 12)
+TOPICS = {
+    "buyback": ("buyback", "buy-back", "repurchase", "token buy back"),
+    "burn": ("burn", "burning", "fee burn", "tokenomics"),
+    "distribution": ("distribution", "revenue share", "fee sharing", "fee distribution"),
+    "staking": ("staking", "real yield", "staking rewards", "staker"),
+    "documentation": ("docs", "documentation", "whitepaper", "economics", "tokenomics"),
 }
+ECONOMIC_TOPICS = ("buyback", "burn", "distribution", "staking")
 FIELDS = [
     "coin_id", "symbol", "name", "protocol_name", "protocol_slug",
-    "discovery_status", "candidate_url", "candidate_url_kind",
-    "source_catalogue", "priority_score", "priority_basis", "fetch_status",
-    "http_status", "content_type", "content_sha256", "retrieved_at_utc",
-    "excerpt", "document_candidates_json", "document_candidate_count",
-    "evidence_scope", "economic_mechanism_verified", "audit_note",
+    "discovery_status", "candidate_url", "candidate_url_kind", "source_catalogue",
+    "priority_score", "priority_basis", "fetch_status", "http_status", "content_type",
+    "content_sha256", "retrieved_at_utc", "excerpt", "document_candidates_json",
+    "document_candidate_count", "evidence_scope", "economic_mechanism_verified", "audit_note",
+]
+DOCUMENT_FIELDS = [
+    "coin_id", "symbol", "protocol_slug", "source_homepage", "document_url",
+    "link_label", "link_topics", "fetch_status", "http_status", "content_type",
+    "content_sha256", "retrieved_at_utc", "document_excerpt", "mentioned_topics",
+    "token_mentioned", "mechanism_documented", "period_verified", "onchain_verified",
+    "independent_source_verified", "economic_mechanism_verified", "evidence_scope", "audit_note",
 ]
 
 
 def _valid_url(url: str) -> bool:
-    """Reject malformed URLs, IP literals, private/local names and non-HTTPS."""
     try:
         p = urlparse(str(url).strip())
         if p.scheme != "https" or not p.hostname or p.username or p.password:
@@ -70,126 +79,145 @@ def _valid_url(url: str) -> bool:
 
 
 def _public_dns(url: str) -> bool:
-    """Best-effort DNS check; requests can re-resolve, so not a strict SSRF sandbox.
-
-    Run only against trusted catalogue-supplied domains in a restricted runner.
-    """
-    host = urlparse(url).hostname
     try:
+        host = urlparse(url).hostname
         addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
-        if not addresses:
-            return False
-        return all(ipaddress.ip_address(item[4][0]).is_global for item in addresses)
+        return bool(addresses) and all(ipaddress.ip_address(x[4][0]).is_global for x in addresses)
     except (OSError, ValueError):
         return False
 
 
-def _safe_number(value) -> float | None:
+def _safe_number(value):
     try:
-        result = float(value)
-        if pd.isna(result) or result in (float("inf"), float("-inf")):
-            return None
-        return result
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
 
-def _priority_table(diagnostic: pd.DataFrame | None) -> dict[str, tuple[float, str]]:
-    """Prioritize for research only; no score or gate modification."""
+def _priority_table(diagnostic: pd.DataFrame | None) -> dict:
+    """Research ordering: Holder Value first, then revenue and opportunity as tie breakers.
+
+    These are existing diagnostic scores, not a newly invented economic score.
+    Missing values are not treated as zero or proof of economic capture.
+    """
     if diagnostic is None or diagnostic.empty or "coin_id" not in diagnostic.columns:
         return {}
-    options = ("opportunity_score_observed", "opportunity_score", "holder_value_score")
-    table = {}
+    result = {}
     for _, row in diagnostic.iterrows():
         coin_id = str(row.get("coin_id", "")).strip()
-        if not coin_id or coin_id in table:
+        if not coin_id or coin_id in result:
             continue
-        for field in options:
-            value = _safe_number(row.get(field))
-            if value is not None:
-                table[coin_id] = (value, field)
-                break
-    return table
+        columns = ("holder_value_score", "revenue_score", "opportunity_score_observed", "opportunity_score")
+        values = tuple(_safe_number(row.get(key)) for key in columns)
+        result[coin_id] = values
+    return result
+
+
+class _LinkParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+        self.href = None
+        self.label = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a" and self.href is None:
+            self.href = dict(attrs).get("href", "")
+            self.label = []
+
+    def handle_data(self, data):
+        if self.href is not None:
+            self.label.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.href is not None:
+            self.links.append((self.href, " ".join(self.label)))
+            self.href = None
+            self.label = []
+
+
+def _topics(text: str) -> list[str]:
+    value = text.lower()
+    return [topic for topic, terms in TOPICS.items() if any(term in value for term in terms)]
 
 
 def _extract_links(page: str, base_url: str) -> list[dict]:
-    """Discover same-host HTTPS documentary links; do not fetch or verify them."""
+    """Same-host links only. A link is a research lead, never proof."""
+    parser = _LinkParser()
+    parser.feed(page)
     base_host = urlparse(base_url).hostname
-    found = []
-    seen = set()
-    # HTML attribute parser is intentionally conservative; not a full browser.
-    for match in re.finditer(r'<a\b[^>]*\bhref\s*=\s*(["\'])(.*?)\1[^>]*>(.*?)</a\s*>',
-                             page, flags=re.I | re.S):
-        raw_href = html.unescape(match.group(2)).strip()
-        if not raw_href or raw_href.startswith(("#", "mailto:", "javascript:", "data:")):
+    found, seen = [], set()
+    for href, label in parser.links:
+        href = html.unescape(str(href)).strip()
+        if not href or href.startswith(("#", "mailto:", "javascript:", "data:")):
             continue
-        target = urldefrag(urljoin(base_url, raw_href))[0]
-        if not _valid_url(target) or urlparse(target).hostname != base_host:
+        target = urldefrag(urljoin(base_url, href))[0]
+        if not _valid_url(target) or urlparse(target).hostname != base_host or target in seen:
             continue
-        label = re.sub(r"<[^>]*>", " ", match.group(3))
-        label = re.sub(r"\s+", " ", html.unescape(label)).strip()[:120]
-        haystack = (target + " " + label).lower()
-        tags = [key for key, terms in KEYWORDS.items() if any(term in haystack for term in terms)]
-        if not tags or target in seen:
+        label = re.sub(r"\s+", " ", label).strip()[:120]
+        topics = _topics(target + " " + label)
+        if not topics:
             continue
         seen.add(target)
-        found.append({"url": target, "label": label, "topics": tags,
+        found.append({"url": target, "label": label, "topics": topics,
                       "verification_status": "LINK_ONLY_NOT_RETRIEVED"})
-        if len(found) >= MAX_LINKS_PER_SITE:
-            break
-    return found
+    found.sort(key=lambda x: (-sum(t in ECONOMIC_TOPICS for t in x["topics"]), x["url"]))
+    return found[:MAX_LINKS_PER_SITE]
 
 
 def _fetch(url: str, session: requests.Session, *, check_dns: bool = True) -> dict:
+    """Small HTTPS fetch, no redirects, never interprets content as verified proof.
+
+    DNS check is best effort, not a network sandbox: run in a restricted CI runner.
+    """
     if not _valid_url(url) or (check_dns and not _public_dns(url)):
-        return {"fetch_status": "UNSAFE_OR_UNRESOLVED_URL",
-                "audit_note": "URL failed HTTPS/public DNS validation"}
+        return {"fetch_status": "UNSAFE_OR_UNRESOLVED_URL", "audit_note": "URL/public DNS rejected"}
     try:
         with session.get(url, timeout=TIMEOUT, stream=True, allow_redirects=False,
                          headers={"Accept": "text/html,text/plain,application/json"}) as response:
             status = response.status_code
-            mime = response.headers.get("Content-Type", "").split(";")[0].lower().strip()
+            mime = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
             if status != 200:
                 return {"fetch_status": "HTTP_NOT_OK", "http_status": status,
-                        "content_type": mime, "audit_note": "Non-200 or redirect; not verified"}
+                        "content_type": mime, "audit_note": "HTTP failure or redirect"}
             if mime not in {"text/html", "text/plain", "application/json"}:
                 return {"fetch_status": "UNSUPPORTED_CONTENT", "http_status": status,
-                        "content_type": mime, "audit_note": "Unsupported content type"}
+                        "content_type": mime, "audit_note": "Unsupported MIME"}
             chunks, size = [], 0
             for chunk in response.iter_content(chunk_size=32768):
                 size += len(chunk)
                 if size > MAX_BYTES:
                     return {"fetch_status": "TOO_LARGE", "http_status": status,
-                            "content_type": mime, "audit_note": "Exceeded bounded download"}
+                            "content_type": mime, "audit_note": "Download exceeds byte limit"}
                 chunks.append(chunk)
             content = b"".join(chunks)
             decoded = content.decode("utf-8", "replace")
             links = _extract_links(decoded, url) if mime == "text/html" else []
-            return {
-                "fetch_status": "HOMEPAGE_RETRIEVED_UNVERIFIED",
-                "http_status": status, "content_type": mime,
-                "content_sha256": hashlib.sha256(content).hexdigest(),
-                "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
-                "excerpt": re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", decoded))[:400],
-                "document_candidates_json": json.dumps(links, ensure_ascii=False),
-                "document_candidate_count": len(links),
-                "audit_note": "Homepage and links only; no mechanism, attribution, period or on-chain proof",
-            }
+            plain = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", decoded)).strip()
+            return {"fetch_status": "RETRIEVED_UNVERIFIED", "http_status": status,
+                    "content_type": mime, "content_sha256": hashlib.sha256(content).hexdigest(),
+                    "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "excerpt": plain[:1200], "links": links,
+                    "mentioned_topics": _topics(plain),
+                    "audit_note": "Document fetched, but no token-holder economic proof established"}
     except requests.RequestException as exc:
         return {"fetch_status": "NETWORK_ERROR", "audit_note": type(exc).__name__}
 
 
 def collect(discovery: pd.DataFrame, max_candidates: int = MAX_CANDIDATES,
-            session: requests.Session | None = None,
-            diagnostic: pd.DataFrame | None = None,
-            *, check_dns: bool = True) -> pd.DataFrame:
-    """Select unique, eligible catalogue candidates; sort by observed score."""
+            session: requests.Session | None = None, diagnostic: pd.DataFrame | None = None,
+            *, check_dns: bool = True, max_documents: int = MAX_DOCUMENTS_TOTAL,
+            return_documents: bool = False):
+    """Backward compatible: returns source DataFrame unless return_documents=True."""
     required = {"coin_id", "symbol", "name", "discovery_status", "candidate_url"}
     missing = required - set(discovery.columns)
     if missing:
         raise ValueError("Discovery CSV missing: " + ", ".join(sorted(missing)))
     if not 1 <= max_candidates <= MAX_CANDIDATES:
         raise ValueError(f"max_candidates must be 1..{MAX_CANDIDATES}")
+    if not 0 <= max_documents <= MAX_DOCUMENTS_TOTAL:
+        raise ValueError(f"max_documents must be 0..{MAX_DOCUMENTS_TOTAL}")
     selected = discovery.loc[
         discovery["discovery_status"].fillna("").astype(str).eq("CANDIDATE_FOUND_UNVERIFIED")
     ].copy()
@@ -197,15 +225,15 @@ def collect(discovery: pd.DataFrame, max_candidates: int = MAX_CANDIDATES,
     selected = selected[selected["coin_id"].ne("")]
     selected = selected.drop_duplicates(subset=["coin_id"], keep=False)
     priorities = _priority_table(diagnostic)
-    selected["_priority"] = selected["coin_id"].map(
-        lambda x: priorities.get(x, (float("-inf"), ""))[0]
-    )
-    selected = selected.sort_values(["_priority", "coin_id"],
-                                    ascending=[False, True], kind="stable").head(max_candidates)
-    own_session = session is None
-    if own_session:
+    def order_key(coin_id):
+        values = priorities.get(coin_id, (None, None, None, None))
+        return tuple(-x if x is not None else float("inf") for x in values)
+    selected["_sort"] = selected["coin_id"].map(order_key)
+    selected = selected.sort_values(["_sort", "coin_id"], kind="stable").head(max_candidates)
+    owns_session = session is None
+    if owns_session:
         session = requests.Session()
-    rows = []
+    rows, documents, fetched_urls = [], [], set()
     try:
         for _, item in selected.iterrows():
             row = {field: "" for field in FIELDS}
@@ -213,33 +241,73 @@ def collect(discovery: pd.DataFrame, max_candidates: int = MAX_CANDIDATES,
                           "discovery_status", "candidate_url", "candidate_url_kind"):
                 if field in selected.columns and pd.notna(item[field]):
                     row[field] = str(item[field]).strip()
-            priority = priorities.get(row["coin_id"])
-            row.update({
-                "source_catalogue": "https://api.llama.fi/protocols",
-                "priority_score": priority[0] if priority else "",
-                "priority_basis": priority[1] if priority else "NO_DIAGNOSTIC_SCORE",
-                "evidence_scope": "PROTOCOL_HOMEPAGE_AND_LINK_CANDIDATES_ONLY",
-                "economic_mechanism_verified": False,
-                "document_candidates_json": "[]", "document_candidate_count": 0,
-            })
+            scores = priorities.get(row["coin_id"], (None, None, None, None))
+            basis = next((key for key, value in zip(
+                ("holder_value_score", "revenue_score", "opportunity_score_observed", "opportunity_score"),
+                scores) if value is not None), "NO_DIAGNOSTIC_SCORE")
+            row.update({"source_catalogue": "https://api.llama.fi/protocols",
+                        "priority_score": next((v for v in scores if v is not None), ""),
+                        "priority_basis": basis,
+                        "evidence_scope": "HOMEPAGE_AND_DOCUMENTARY_LEADS_ONLY",
+                        "economic_mechanism_verified": False,
+                        "document_candidates_json": "[]", "document_candidate_count": 0})
             if not _valid_url(row["candidate_url"]):
-                row.update(fetch_status="INVALID_CANDIDATE",
-                           audit_note="Missing or invalid HTTPS catalogue URL")
+                row.update(fetch_status="INVALID_CANDIDATE", audit_note="Invalid HTTPS catalogue URL")
             else:
-                row.update(_fetch(row["candidate_url"], session, check_dns=check_dns))
+                result = _fetch(row["candidate_url"], session, check_dns=check_dns)
+                links = result.pop("links", [])
+                result.pop("mentioned_topics", None)
+                if result.get("fetch_status") == "RETRIEVED_UNVERIFIED":
+                    result["fetch_status"] = "HOMEPAGE_RETRIEVED_UNVERIFIED"
+                row.update(result)
+                row["document_candidates_json"] = json.dumps(links, ensure_ascii=False)
+                row["document_candidate_count"] = len(links)
+                for link in links:
+                    if len(documents) >= max_documents:
+                        break
+                    doc_url = link["url"]
+                    if doc_url in fetched_urls:
+                        continue
+                    fetched_urls.add(doc_url)
+                    doc = {field: "" for field in DOCUMENT_FIELDS}
+                    doc.update({"coin_id": row["coin_id"], "symbol": row["symbol"],
+                                "protocol_slug": row["protocol_slug"],
+                                "source_homepage": row["candidate_url"],
+                                "document_url": doc_url, "link_label": link["label"],
+                                "link_topics": json.dumps(link["topics"], ensure_ascii=False),
+                                "mechanism_documented": False, "period_verified": False,
+                                "onchain_verified": False, "independent_source_verified": False,
+                                "economic_mechanism_verified": False,
+                                "evidence_scope": "DOCUMENT_CONTENT_RESEARCH_ONLY"})
+                    fetched = _fetch(doc_url, session, check_dns=check_dns)
+                    doc.update({"fetch_status": fetched.get("fetch_status", ""),
+                                "http_status": fetched.get("http_status", ""),
+                                "content_type": fetched.get("content_type", ""),
+                                "content_sha256": fetched.get("content_sha256", ""),
+                                "retrieved_at_utc": fetched.get("retrieved_at_utc", ""),
+                                "document_excerpt": fetched.get("excerpt", ""),
+                                "mentioned_topics": json.dumps(fetched.get("mentioned_topics", []), ensure_ascii=False),
+                                "token_mentioned": bool(row["symbol"] and re.search(
+                                    r"(?<![a-zA-Z0-9])" + re.escape(row["symbol"]) + r"(?![a-zA-Z0-9])",
+                                    fetched.get("excerpt", ""), flags=re.I)),
+                                "audit_note": fetched.get("audit_note", "")})
+                    documents.append(doc)
             rows.append(row)
     finally:
-        if own_session:
+        if owns_session:
             session.close()
-    return pd.DataFrame(rows, columns=FIELDS)
+    sources = pd.DataFrame(rows, columns=FIELDS)
+    docs = pd.DataFrame(documents, columns=DOCUMENT_FIELDS)
+    return (sources, docs) if return_documents else sources
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read-only Holder Value source discovery")
+    parser = argparse.ArgumentParser(description="Read-only Holder Value documentary research")
     parser.add_argument("--discovery", default="output/holder_value_discovery.csv")
     parser.add_argument("--diagnostic", default="output/crypto_diagnostic_all.csv")
     parser.add_argument("--output", default="output/holder_value_auto_sources.csv")
     parser.add_argument("--max-candidates", type=int, default=MAX_CANDIDATES)
+    parser.add_argument("--max-documents", type=int, default=MAX_DOCUMENTS_TOTAL)
     args = parser.parse_args()
     source = Path(args.discovery)
     if not source.is_file():
@@ -248,21 +316,25 @@ def main() -> None:
     diagnostic_path = Path(args.diagnostic)
     diagnostic = (pd.read_csv(diagnostic_path, dtype=str, keep_default_na=False)
                   if diagnostic_path.is_file() else None)
-    results = collect(discovery, max_candidates=args.max_candidates, diagnostic=diagnostic)
+    results, docs = collect(discovery, args.max_candidates, diagnostic=diagnostic,
+                            max_documents=args.max_documents, return_documents=True)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(output, index=False, encoding="utf-8-sig")
+    doc_path = output.with_name("holder_value_auto_documents.csv")
+    docs.to_csv(doc_path, index=False, encoding="utf-8-sig")
     summary = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "input": str(source), "input_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "diagnostic_used": diagnostic is not None,
-        "selection_method": "descending diagnostic score then coin_id" if diagnostic is not None else "coin_id",
+        "selection_method": "holder_value, revenue, opportunity (descending); coin_id tie-break",
         "candidates_checked": len(results),
         "homepages_retrieved": int((results["fetch_status"] == "HOMEPAGE_RETRIEVED_UNVERIFIED").sum()),
         "document_links_discovered": int(pd.to_numeric(results["document_candidate_count"], errors="coerce").fillna(0).sum()),
-        "economic_mechanisms_verified": 0,
-        "approval_flags_modified": False,
-        "warning": "Document links are research leads only; economic mechanisms and on-chain events remain unverified",
+        "documents_attempted": len(docs),
+        "documents_retrieved": int((docs["fetch_status"] == "RETRIEVED_UNVERIFIED").sum()),
+        "economic_mechanisms_verified": 0, "approval_flags_modified": False,
+        "warning": "Document mentions are not proof of token value capture or independent on-chain verification",
     }
     output.with_name("holder_value_auto_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
