@@ -1,0 +1,80 @@
+
+name: Holder Value Auto Discovery
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "Run Crypto Opportunity Engine"
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  discover:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pandas requests
+
+      - name: Download engine artifacts
+        if: github.event_name == 'workflow_run'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          mkdir -p output
+          gh run download "$RUN_ID" --dir artifacts
+
+          find artifacts -type f -name \
+            holder_value_discovery.csv -print
+
+          FILE=$(find artifacts -type f \
+            -name holder_value_discovery.csv \
+            -print -quit)
+
+          if [ -z "$FILE" ]; then
+            echo "Discovery CSV not found in artifacts"
+            exit 1
+          fi
+
+          cp "$FILE" output/holder_value_discovery.csv
+
+      - name: Check discovery input
+        run: |
+          test -f output/holder_value_discovery.csv
+
+      - name: Run automatic source discovery
+        run: |
+          python holder_value_auto_discovery.py \
+            --discovery output/holder_value_discovery.csv \
+            --output output/holder_value_auto_sources.csv \
+            --max-candidates 30
+
+      - name: Upload discovery reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holder-value-auto-discovery
+          path: |
+            output/holder_value_auto_sources.csv
+            output/holder_value_auto_summary.json
+          if-no-files-found: warn
