@@ -67,6 +67,11 @@ from data.holder_value_data import (
     enrich_with_holder_value_data,
 )
 
+from data.holder_value_evidence import (
+    verify_csv as verify_holder_value_evidence_csv,
+    MAX_ROWS as HOLDER_EVIDENCE_MAX_ROWS,
+)
+
 from data.revenue_data import (
     enrich_with_revenue_data,
 )
@@ -573,6 +578,52 @@ def run_engine_step(
     )
 
     return result
+
+
+# ============================================================
+# INDEPENDENT BLOCK EVIDENCE — REPORTING ONLY
+# ============================================================
+
+def run_independent_block_evidence_checks() -> None:
+    """Verify existing block samples without modifying investment decisions.
+
+    This stage does not discover new blocks, calculate 30-day burn totals,
+    or approve holder value. Only pre-existing bounded CSV samples are read.
+    """
+    from pathlib import Path
+    import csv
+
+    candidate_files = (
+        Path(OUTPUT_DIR) / "fase3h_blocos_evm_amostrados.csv",
+        Path(OUTPUT_DIR) / "fase3i_blocos_diarios_verificados.csv",
+    )
+    found = [path for path in candidate_files if path.is_file()]
+    if not found:
+        print("[holder_value_evidence] No sample CSV found in output/; "
+              "independent block check skipped. Economic evidence remains pending.")
+        return
+
+    for source in found:
+        try:
+            # Preflight size limit before issuing any RPC requests.
+            with source.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                count = sum(1 for _ in reader)
+            if count > HOLDER_EVIDENCE_MAX_ROWS:
+                print(f"[holder_value_evidence] SKIPPED {source.name}: "
+                      f"{count} samples exceed {HOLDER_EVIDENCE_MAX_ROWS} limit.")
+                continue
+            destination = Path(OUTPUT_DIR) / "holder_value_evidence" / source.stem
+            report = verify_holder_value_evidence_csv(source, destination)
+            print(f"[holder_value_evidence] {source.name}: "
+                  f"verified_blocks={report['verified_block_count']}, "
+                  f"unverified_blocks={report['unverified_block_count']}; "
+                  "no approval flags modified.")
+        except Exception as error:
+            # Optional reporting cannot change or silently grant approval.
+            print(f"[holder_value_evidence] {source.name}: "
+                  f"verification failed ({type(error).__name__}: {error}). "
+                  "No economic capture inferred.")
 
 
 # ============================================================
@@ -1277,6 +1328,10 @@ def run_crypto_opportunity_engine() -> Dict:
         top_result=top_result,
         rejected_result=rejected,
     )
+
+    # Independent verification of pre-existing block samples, if supplied.
+    # Never feeds sample-burn observations into Holder Value or Ranking scores.
+    run_independent_block_evidence_checks()
 
     # ========================================================
     # 7. SUMMARY
